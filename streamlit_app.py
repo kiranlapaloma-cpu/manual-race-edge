@@ -28,7 +28,6 @@ def clamp(v, lo, hi):
     return max(lo, min(hi, float(v)))
 
 def mad_std(x):
-    # robust sigma from MAD
     x = np.asarray(x, dtype=float)
     x = x[np.isfinite(x)]
     if x.size == 0:
@@ -42,11 +41,9 @@ def winsorize(s, p_lo=0.10, p_hi=0.90):
     hi = s.quantile(p_hi)
     return s.clip(lower=lo, upper=hi)
 
-def _lerp(a, b, t):
-    return a + (b - a) * float(t)
+def _lerp(a, b, t): return a + (b - a) * float(t)
 
 def _interpolate_weights(dm, a_dm, a_w, b_dm, b_w):
-    # linear interpolate between two anchors a_dm -> b_dm
     span = float(b_dm - a_dm)
     t = 0.0 if span <= 0 else (float(dm) - a_dm) / span
     return {
@@ -99,27 +96,19 @@ def pi_weights_distance_and_context(distance_m: float,
       - 1100m anchor: F200=0.10, tsSPI=0.36, Accel=0.34, Grind=0.20
       - 1200m anchor: F200=0.08, tsSPI=0.37, Accel=0.30, Grind=0.25
       - >1200m: shift 0.01 per +100m from tsSPI → Grind, cap Grind at 0.40
-                (F200 stays 0.08, Accel stays 0.30; tsSPI = 1 - F200 - Accel - Grind)
-
-    Context nudge (tiny, ±0.02 max total):
-      - If race is kick-biased (median Accel > median Grind), move up to 0.02 from Accel→Grind
-      - If grind-biased (median Grind > median Accel), move up to 0.02 from Grind→Accel
-      - Smoothly scaled by tanh(|bias| / 6)
+    Context nudge (±0.02 total).
     """
     dm = float(distance_m or 1200)
 
-    # ---- distance base weights ----
     if dm <= 1000:
         base = {"F200_idx":0.12, "tsSPI":0.35, "Accel":0.36, "Grind":0.17}
     elif dm < 1100:
-        base = _interpolate_weights(
-            dm,
+        base = _interpolate_weights(dm,
             1000, {"F200_idx":0.12, "tsSPI":0.35, "Accel":0.36, "Grind":0.17},
             1100, {"F200_idx":0.10, "tsSPI":0.36, "Accel":0.34, "Grind":0.20}
         )
     elif dm < 1200:
-        base = _interpolate_weights(
-            dm,
+        base = _interpolate_weights(dm,
             1100, {"F200_idx":0.10, "tsSPI":0.36, "Accel":0.34, "Grind":0.20},
             1200, {"F200_idx":0.08, "tsSPI":0.37, "Accel":0.30, "Grind":0.25}
         )
@@ -128,29 +117,23 @@ def pi_weights_distance_and_context(distance_m: float,
     else:
         shift_units = max(0.0, (dm - 1200.0) / 100.0) * 0.01
         grind = min(0.25 + shift_units, 0.40)
-        F200  = 0.08
-        ACC   = 0.30
-        ts    = max(0.0, 1.0 - F200 - ACC - grind)
-        base  = {"F200_idx":F200, "tsSPI":ts, "Accel":ACC, "Grind":grind}
+        F200, ACC = 0.08, 0.30
+        ts = max(0.0, 1.0 - F200 - ACC - grind)
+        base = {"F200_idx":F200, "tsSPI":ts, "Accel":ACC, "Grind":grind}
 
-    # ---- context nudge (very small) ----
     acc_med = float(acc_median) if acc_median is not None else None
     grd_med = float(grd_median) if grd_median is not None else None
-
     if acc_med is not None and grd_med is not None and math.isfinite(acc_med) and math.isfinite(grd_med):
         bias = acc_med - grd_med
         scale = math.tanh(abs(bias) / 6.0)
         max_shift = 0.02 * scale
-
-        F200 = base["F200_idx"]; ts = base["tsSPI"]; ACC = base["Accel"]; GR = base["Grind"]
-
+        F200, ts, ACC, GR = base["F200_idx"], base["tsSPI"], base["Accel"], base["Grind"]
         if bias > 0:
-            delta = min(max_shift, ACC - 0.26)  # keep floor
+            delta = min(max_shift, ACC - 0.26)
             ACC -= delta; GR += delta
         elif bias < 0:
-            delta = min(max_shift, GR - 0.18)  # keep floor
+            delta = min(max_shift, GR - 0.18)
             GR  -= delta; ACC += delta
-
         GR = min(GR, 0.40)
         ts = max(0.0, 1.0 - F200 - ACC - GR)
         base = {"F200_idx":F200, "tsSPI":ts, "Accel":ACC, "Grind":GR}
@@ -184,12 +167,13 @@ def build_metrics(df_in: pd.DataFrame, actual_distance_m: float):
             except Exception:
                 pass
 
+    # order: D-200, D-400, ..., 200
     markers = sorted(set(markers), reverse=True)
     has_finish = finish_col is not None
 
     # per-segment speeds (m/s). Normal 200m segments keyed as spd_<start>.
     for m in markers:
-        w[f"spd_{m}"] = 200.0 / as_num(w[f"{m}_Time"])
+        w[f"spd_{m}"] = 200.0 / as_num(w.get(f"{m}_Time"))
     # finishing split: treat as start marker 0 (200 -> Finish)
     if has_finish:
         w["spd_0"] = 200.0 / as_num(w[finish_col])
@@ -227,10 +211,26 @@ def build_metrics(df_in: pd.DataFrame, actual_distance_m: float):
             return 100.0 + deltas * factor
         return idx_series
 
-    # ---------- F200 (first 200 m segment only) ----------
-    first_mark = max(markers) if markers else None
-    if first_mark and f"spd_{first_mark}" in w.columns:
-        base = w[f"spd_{first_mark}"]
+    # ---- derive canonical windows from distance ----
+    D = int(round(float(actual_distance_m) / 200.0)) * 200  # snap to 200m grid
+    f200_start = D - 200 if (D - 200) in markers else (markers[0] if markers else None)
+
+    # tsSPI = all starts from D-400 down to 600 inclusive (never includes F200, 400, 200, or Finish)
+    tsSPI_marks = [m for m in markers if (600 <= m <= (D - 400))]
+    # Accel = 400 and 200 starts (if present)
+    accel_marks = [m for m in [400, 200] if m in markers]
+
+    _dbg("Distance windows", {
+        "D": D,
+        "F200_start": f200_start,
+        "tsSPI_marks": tsSPI_marks,
+        "accel_marks": accel_marks,
+        "has_finish": has_finish
+    })
+
+    # ---------- F200 (first split only) ----------
+    if f200_start and f"spd_{f200_start}" in w.columns:
+        base = w[f"spd_{f200_start}"]
         prelim = 100.0 * (base / base.median(skipna=True))
         center, n_eff = shrink_center(prelim)
         f200 = 100.0 * (base / (center / 100.0 * base.median(skipna=True)))
@@ -240,36 +240,13 @@ def build_metrics(df_in: pd.DataFrame, actual_distance_m: float):
     else:
         w["F200_idx"] = np.nan
 
-    # ---------- tsSPI (exclude first 200 & last 600) ----------
-    # For pure 200m splits, "last 600" = last three 200m segments: 600–400, 400–200, 200–Finish.
-    # We exclude those and the first 200; average over the remaining mid-race segments.
-    # Build an ordered list of segment starts including the artificial 0 (finish) to reason about ends.
-    ordered_starts = markers.copy()
-    if has_finish and (0 not in ordered_starts):
-        ordered_starts.append(0)
-    ordered_starts = sorted(set(ordered_starts), reverse=True)
-
-    def tsspi_avg(row):
-        if len(markers) == 0:
-            return np.nan
-        mids = markers[1:]  # drop first 200
-        # drop last three 200m blocks if finish is present; else drop last two (up to 200)
-        tail_drop = 3 if has_finish else 2
-        if len(mids) > tail_drop:
-            mids = mids[:-tail_drop]
-        else:
-            # adaptive fallback windows
-            if len(mids) >= 2:
-                mids = mids[:-1]
-            elif len(mids) == 1:
-                mids = mids
-            else:
-                return np.nan
-        vals = [row.get(f"spd_{m}") for m in mids if f"spd_{m}" in row.index]
+    # ---------- tsSPI (D-400 … 600 inclusive) ----------
+    def mean_marks(row, marks):
+        vals = [row.get(f"spd_{m}") for m in marks if f"spd_{m}" in row.index]
         vals = [v for v in vals if pd.notna(v)]
         return np.nan if not vals else float(np.mean(vals))
 
-    w["_mid_spd"] = w.apply(tsspi_avg, axis=1)
+    w["_mid_spd"] = w.apply(lambda r: mean_marks(r, tsSPI_marks), axis=1)
     mid_med = w["_mid_spd"].median(skipna=True)
     w["tsSPI_raw"] = 100.0 * (w["_mid_spd"] / mid_med)
     center_ts, n_ts = shrink_center(w["tsSPI_raw"])
@@ -278,26 +255,8 @@ def build_metrics(df_in: pd.DataFrame, actual_distance_m: float):
     tsSPI = variance_floor(tsSPI)
     w["tsSPI"] = tsSPI
 
-    # ---------- Accel: last 600→200 (three 200m segments immediately before the last 200) ----------
-    # Example: … 800, 600, 400, 200, (Finish). Accel window = 800, 600, 400 (or 600, 400, 200 if finish absent).
-    def accel_window(starts):
-        if has_finish:
-            # exclude the last 200 (which is 200->Finish at start=200), take the three before it
-            if 200 in starts:
-                idx = starts.index(200)
-                return [m for m in starts[idx+1:idx+4] if m > 0]  # previous three starts toward early race
-        # fallback: last 3 available above the smallest start
-        tail = sorted([m for m in markers if m > 0])[-3:]
-        return tail
-
-    accel_win = accel_window(ordered_starts)
-
-    def mean_marks(row, marks):
-        vals = [row.get(f"spd_{m}") for m in marks if f"spd_{m}" in row.index]
-        vals = [v for v in vals if pd.notna(v)]
-        return np.nan if not vals else float(np.mean(vals))
-
-    w["_accel_spd"] = w.apply(lambda r: mean_marks(r, accel_win), axis=1)
+    # ---------- Accel (400 & 200 splits) ----------
+    w["_accel_spd"] = w.apply(lambda r: mean_marks(r, accel_marks), axis=1)
     a_med = w["_accel_spd"].median(skipna=True)
     w["Accel_raw"] = 100.0 * (w["_accel_spd"] / a_med)
     center_a, n_a = shrink_center(w["Accel_raw"])
@@ -306,12 +265,12 @@ def build_metrics(df_in: pd.DataFrame, actual_distance_m: float):
     Accel = variance_floor(Accel)
     w["Accel"] = Accel
 
-    # ---------- Grind: last 200 (200 → Finish) ----------
-    # Uses spd_0 when Finish_Time/0_Time is present; else uses spd_200 (200→0 missing → use 200→??) — if absent, NaN.
+    # ---------- Grind (Finish split) ----------
     if has_finish and "spd_0" in w.columns:
         g_base = w["spd_0"]
     elif "spd_200" in w.columns:
-        g_base = w["spd_200"]  # best-effort fallback if finish is missing
+        # fallback if finish missing: use the 200 start split
+        g_base = w["spd_200"]
     else:
         g_base = pd.Series(np.nan, index=w.index)
 
@@ -323,7 +282,7 @@ def build_metrics(df_in: pd.DataFrame, actual_distance_m: float):
     Grind = variance_floor(Grind)
     w["Grind"] = Grind
 
-    # ---------- PI v3.1 (distance- & context-aware weights, robust 0–10 scaling) ----------
+    # ---------- PI v3.1 ----------
     acc_med = w["Accel"].median(skipna=True)
     grd_med = w["Grind"].median(skipna=True)
     PI_W = pi_weights_distance_and_context(float(actual_distance_m), acc_med, grd_med)
@@ -335,11 +294,9 @@ def build_metrics(df_in: pd.DataFrame, actual_distance_m: float):
             if pd.notna(v):
                 parts.append(wgt * (v - 100.0))
                 weights.append(wgt)
-        if not weights:
-            return np.nan
-        return sum(parts) / sum(weights)
-    w["PI_pts"] = w.apply(pi_pts_row, axis=1)
+        return np.nan if not weights else sum(parts) / sum(weights)
 
+    w["PI_pts"] = w.apply(pi_pts_row, axis=1)
     pts = pd.to_numeric(w["PI_pts"], errors="coerce")
     med = float(np.nanmedian(pts)) if np.isfinite(np.nanmedian(pts)) else 0.0
     centered = pts - med
@@ -348,7 +305,7 @@ def build_metrics(df_in: pd.DataFrame, actual_distance_m: float):
         sigma = 0.75
     w["PI"] = (5.0 + 2.2 * (centered / sigma)).clip(0.0, 10.0).round(2)
 
-    # ---------- GCI (0–10) — aligned with distance+context weights ----------
+    # ---------- GCI ----------
     acc_med_g = w["Accel"].median(skipna=True)
     grd_med_g = w["Grind"].median(skipna=True)
     Wg = pi_weights_distance_and_context(float(actual_distance_m), acc_med_g, grd_med_g)
@@ -371,7 +328,6 @@ def build_metrics(df_in: pd.DataFrame, actual_distance_m: float):
 
     gci_vals = []
     for _, r in w.iterrows():
-        # T = closeness to winner on raw race time
         T = 0.0
         if winner_time is not None and pd.notna(r.get("RaceTime_s")):
             d = float(r["RaceTime_s"]) - winner_time
@@ -390,7 +346,7 @@ def build_metrics(df_in: pd.DataFrame, actual_distance_m: float):
             dev = (abs(acc - 100.0) + abs(grd - 100.0)) / 2.0
             EFF = clamp(1.0 - dev / 8.0, 0.0, 1.0)
 
-        score01 = (wT * T) + (wPACE * SS * 0 + wPACE * LQ) + (wSS * SS) + (wEFF * EFF)  # (explicit + LQ path)
+        score01 = (wT * T) + (wPACE * LQ) + (wSS * SS) + (wEFF * EFF)
         gci_vals.append(round(10.0 * score01, 3))
 
     w["GCI"] = gci_vals
@@ -400,15 +356,14 @@ def build_metrics(df_in: pd.DataFrame, actual_distance_m: float):
         if c in w.columns:
             w[c] = w[c].round(3)
 
-    return w, markers, has_finish, finish_col
+    return w, markers, has_finish, finish_col, D
 
 # ---- compute metrics safely
 try:
-    metrics, markers, has_finish, finish_col = build_metrics(work, float(race_distance_input))
+    metrics, markers, has_finish, finish_col, D = build_metrics(work, float(race_distance_input))
 except Exception as e:
     st.error("Metric computation failed.")
-    if DEBUG:
-        st.exception(e)
+    st.exception(e) if DEBUG else None
     st.stop()
 
 # ======================= Metrics table =====================
@@ -577,7 +532,7 @@ else:
         st.download_button("Download shape map (PNG)", buf.getvalue(),
                            file_name="shape_map.png", mime="image/png")
 
-# ======================= Visual 2: Pace Curve — includes Finish split =================
+# ======================= Pace Curve — includes Finish split =================
 st.markdown("## Pace Curve — field average (black) + Top 8 finishers (includes Finish split)")
 
 # Build ordered segments as (start_m, end_m, length_m); ensure the last is 200→Finish if provided.
@@ -593,10 +548,8 @@ else:
     for i, start in enumerate(seg_starts):
         end = seg_starts[i + 1] if (i + 1) < len(seg_starts) else None
         if end is None:
-            # no trailing segment beyond finish; skip
             continue
         seg_len = float(start - end)
-        # The final actual segment should be 200→0 (Finish) with start=200,end=0
         if start == 200 and end == 0:
             seg_len = 200.0
         if seg_len <= 0:
@@ -639,7 +592,6 @@ else:
 
         palette = color_cycle(len(top8))
         for i, (_, r) in enumerate(top8.iterrows()):
-            # find raw times by name in original table if available
             if "Horse" in work.columns and "Horse" in metrics.columns:
                 row0 = work[work["Horse"] == r.get("Horse")]
                 row_times = row0.iloc[0] if not row0.empty else r
@@ -705,9 +657,7 @@ else:
     hh["ASI2"] = (B * (S).clip(lower=0.0) / 5.0).fillna(0.0)
 
 # ---------- 3) TFS (trip friction) ----------
-# Use last three segments available relative to the finish, if present; else use as many as available.
-last3 = []
-tail_candidates = sorted([m for m in markers if m >= 200])[:3]  # closest to finish: 600,400,200 if present
+tail_candidates = sorted([m for m in markers if m >= 200])[:3]  # 600,400,200 if present
 last3 = sorted(tail_candidates, reverse=True)
 
 def tfs_row(row):
@@ -820,7 +770,7 @@ st.dataframe(
 )
 
 st.caption(
-    "Notes — Upload uses **200 m splits** and **includes the 200→Finish split** (`Finish_Time` or `0_Time`). "
-    "F200 = first 200 m; tsSPI excludes first 200 and last 600; Accel = 600→200 window; Grind = last 200 (to Finish). "
-    "PI v3.1 uses distance- & context-aware weights; GCI aligns to the same worldview."
+    "Definitions — **F200**: first split (D−200). **tsSPI**: all splits from D−400 down to 600 inclusive "
+    "(never includes F200/400/200/Finish). **Acceleration**: 400 & 200 splits. **Grind**: Finish split (200→Finish). "
+    "Upload expects 200 m splits, including a Finish_Time (or 0_Time). Pace curve includes the Finish point."
 )
