@@ -9,7 +9,7 @@ import io
 import math
 
 # ======================= Page config =======================
-st.set_page_config(page_title="Race Edge — Manual Mode (PI v3.1 + GCI + Hidden Horses v2)", layout="wide")
+st.set_page_config(page_title="Race Edge — Upload (200m splits) | PI v3.1 + GCI + Hidden Horses v2", layout="wide")
 
 # ======================= Small helpers =====================
 def as_num(x):
@@ -56,19 +56,14 @@ def _interpolate_weights(dm, a_dm, a_w, b_dm, b_w):
         "Grind":    _lerp(a_w["Grind"],    b_w["Grind"],    t),
     }
 
-# ======================= Sidebar (Manual only) ===========================
+# ======================= Sidebar ===========================
 with st.sidebar:
-    st.markdown("### Manual Mode")
-    race_distance_input = st.number_input("Actual Race Distance (m)", min_value=800, max_value=4000, step=50, value=1200)
-    # Grid rounding rule: round UP to next 200 for entry convenience
-    rounded_grid_distance = int(np.ceil(race_distance_input / 200.0) * 200)
-    st.caption(
-        f"Entry grid is rounded to **{rounded_grid_distance} m** (200 m splits), "
-        f"but all calculations use the **actual distance = {int(race_distance_input)} m**."
+    st.markdown("### Upload race file (200 m splits)")
+    race_distance_input = st.number_input("Race Distance (m)", min_value=800, max_value=4000, step=50, value=1200)
+    up = st.file_uploader(
+        "CSV/XLSX with 200 m segments like `1600_Time`,`1400_Time`,…,`200_Time` + **`Finish_Time`** (or `0_Time`). Optional `*_Pos`.",
+        type=["csv", "xlsx", "xls"]
     )
-
-    n_horses = st.number_input("Number of horses", min_value=2, max_value=20, value=8, step=1)
-    st.markdown("---")
     DEBUG = st.toggle("Debug info", value=False)
 
 def _dbg(label, obj=None):
@@ -77,23 +72,22 @@ def _dbg(label, obj=None):
         if obj is not None:
             st.write(obj)
 
-# ======================= Build manual entry grid =========================
-# Columns represent the END of each 200 m segment from the start, plus the final 200→Finish split.
-# Example: for 1000 m grid => 800_Time, 600_Time, 400_Time, 200_Time, Finish_Time
-grid_markers = list(range(rounded_grid_distance - 200, 0, -200))  # e.g. 1200 -> [1000,800,600,400,200]
-cols = ["Horse", "Finish_Pos"]
-for m in grid_markers:
-    cols += [f"{m}_Time", f"{m}_Pos"]
-cols += ["Finish_Time"]  # explicit 200→Finish segment (last 200 m)
+# ======================= Load data =========================
+if not up:
+    st.stop()
 
-st.markdown("### Enter segment times (seconds) for each 200 m leg; positions optional.")
-template = pd.DataFrame([[None, None] + [None] * (2 * len(grid_markers)) + [None] for _ in range(n_horses)], columns=cols)
-work = st.data_editor(template, num_rows="dynamic", use_container_width=True, key="manual_grid").copy()
+try:
+    work = pd.read_csv(up) if up.name.lower().endswith(".csv") else pd.read_excel(up)
+    st.success("File loaded.")
+except Exception as e:
+    st.error("Failed to read file.")
+    if DEBUG:
+        st.exception(e)
+    st.stop()
 
-st.success("Manual grid captured.")
-st.markdown("### Raw / Converted Table")
+st.markdown("### Raw Table (first 12 rows)")
 st.dataframe(work.head(12), use_container_width=True)
-_dbg("Grid markers (end-of-segment labels)", grid_markers)
+_dbg("Columns", list(work.columns))
 
 # ======================= Distance + Context PI weights =======================
 def pi_weights_distance_and_context(distance_m: float,
@@ -107,7 +101,10 @@ def pi_weights_distance_and_context(distance_m: float,
       - >1200m: shift 0.01 per +100m from tsSPI → Grind, cap Grind at 0.40
                 (F200 stays 0.08, Accel stays 0.30; tsSPI = 1 - F200 - Accel - Grind)
 
-    Context nudge (tiny, ±0.02 max total) based on race median Accel vs Grind.
+    Context nudge (tiny, ±0.02 max total):
+      - If race is kick-biased (median Accel > median Grind), move up to 0.02 from Accel→Grind
+      - If grind-biased (median Grind > median Accel), move up to 0.02 from Grind→Accel
+      - Smoothly scaled by tanh(|bias| / 6)
     """
     dm = float(distance_m or 1200)
 
@@ -129,7 +126,6 @@ def pi_weights_distance_and_context(distance_m: float,
     elif dm == 1200:
         base = {"F200_idx":0.08, "tsSPI":0.37, "Accel":0.30, "Grind":0.25}
     else:
-        # shift from tsSPI to Grind, +0.01 per +100m, cap Grind at 0.40
         shift_units = max(0.0, (dm - 1200.0) / 100.0) * 0.01
         grind = min(0.25 + shift_units, 0.40)
         F200  = 0.08
@@ -142,17 +138,17 @@ def pi_weights_distance_and_context(distance_m: float,
     grd_med = float(grd_median) if grd_median is not None else None
 
     if acc_med is not None and grd_med is not None and math.isfinite(acc_med) and math.isfinite(grd_med):
-        bias = acc_med - grd_med  # +ve = kick-leaning, −ve = grind-leaning
+        bias = acc_med - grd_med
         scale = math.tanh(abs(bias) / 6.0)
         max_shift = 0.02 * scale
 
         F200 = base["F200_idx"]; ts = base["tsSPI"]; ACC = base["Accel"]; GR = base["Grind"]
 
         if bias > 0:
-            delta = min(max_shift, ACC - 0.26)  # floor on Accel
+            delta = min(max_shift, ACC - 0.26)  # keep floor
             ACC -= delta; GR += delta
         elif bias < 0:
-            delta = min(max_shift, GR - 0.18)   # floor on Grind
+            delta = min(max_shift, GR - 0.18)  # keep floor
             GR  -= delta; ACC += delta
 
         GR = min(GR, 0.40)
@@ -164,46 +160,57 @@ def pi_weights_distance_and_context(distance_m: float,
         base = {k: v / s for k, v in base.items()}
     return base
 
-# ======================= Core metric build (Manual grid) =================
-def build_metrics_manual(df_in: pd.DataFrame, actual_distance_m: float, grid_markers: list[int]):
-    """
-    df_in has columns:
-      Horse, Finish_Pos, <m>_Time, <m>_Pos for m in grid_markers (e.g., 1000,800,...,200), and Finish_Time.
-    Internally we add a synthetic '0_Time' for Finish_Time so 'last 200' is measured correctly.
-    """
+# ======================= Core metric build =================
+def build_metrics(df_in: pd.DataFrame, actual_distance_m: float):
     w = df_in.copy()
 
     # numeric finish pos (if present)
     if "Finish_Pos" in w.columns:
         w["Finish_Pos"] = as_num(w["Finish_Pos"])
 
-    # build seg markers (include 0 as 'Finish')
-    seg_markers = sorted(set([int(m) for m in grid_markers] + [0]), reverse=True)  # e.g., [1000,800,600,400,200,0]
+    # collect *_Time columns: allow Finish_Time or 0_Time
+    time_cols = [c for c in w.columns if str(c).endswith("_Time")]
+    markers = []
+    finish_col = None
+    for c in time_cols:
+        head = str(c).split("_")[0]
+        if head.lower() == "finish" or head == "0":
+            finish_col = c
+        else:
+            try:
+                m = int(head)
+                if m > 0 and m % 200 == 0:
+                    markers.append(m)
+            except Exception:
+                pass
 
-    # make internal 0_Time from Finish_Time (200→Finish) for uniform handling
-    if "Finish_Time" in w.columns:
-        w["0_Time"] = as_num(w["Finish_Time"])
+    markers = sorted(set(markers), reverse=True)
+    has_finish = finish_col is not None
+
+    # per-segment speeds (m/s). Normal 200m segments keyed as spd_<start>.
+    for m in markers:
+        w[f"spd_{m}"] = 200.0 / as_num(w[f"{m}_Time"])
+    # finishing split: treat as start marker 0 (200 -> Finish)
+    if has_finish:
+        w["spd_0"] = 200.0 / as_num(w[finish_col])
+
+    # race time = sum of all segment times including finish if present
+    sum_cols = [f"{m}_Time" for m in markers if f"{m}_Time" in w.columns]
+    if has_finish:
+        sum_cols.append(finish_col)
+    if sum_cols:
+        w["RaceTime_s"] = w[sum_cols].apply(pd.to_numeric, errors="coerce").sum(axis=1)
     else:
-        w["0_Time"] = np.nan
+        w["RaceTime_s"] = as_num(w.get("Race Time", np.nan))
 
-    # per-segment speeds (all 200 m legs, including the final 200→Finish)
-    for m in seg_markers:
-        col = f"{m}_Time" if m != 0 else "0_Time"
-        w[f"spd_{m}"] = 200.0 / as_num(w[col])
-
-    # race time = sum of all 200 m splits including the finish split
-    sum_cols = [f"{m}_Time" for m in grid_markers if f"{m}_Time" in w.columns]
-    sum_cols.append("0_Time")
-    w["RaceTime_s"] = w[sum_cols].apply(pd.to_numeric, errors="coerce").sum(axis=1)
-
-    # ---------- small-field stabilizers ----------
+    # ----- helper stabilizers -----
     def shrink_center(idx_series):
         x = idx_series.dropna().values
         N_eff = len(x)
         if N_eff == 0:
             return 100.0, 0
         med_race = float(np.median(x))
-        alpha = N_eff / (N_eff + 6.0)    # gentle pull to 100 when N is small
+        alpha = N_eff / (N_eff + 6.0)
         return alpha * med_race + (1 - alpha) * 100.0, N_eff
 
     def dispersion_equalizer(delta_series, N_eff, N_ref=10, beta=0.20, cap=1.20):
@@ -220,8 +227,8 @@ def build_metrics_manual(df_in: pd.DataFrame, actual_distance_m: float, grid_mar
             return 100.0 + deltas * factor
         return idx_series
 
-    # ---------- F200 = first 200 m from the start ----------
-    first_mark = max(seg_markers) if seg_markers else None  # e.g., 1000 for a 1200 grid
+    # ---------- F200 (first 200 m segment only) ----------
+    first_mark = max(markers) if markers else None
     if first_mark and f"spd_{first_mark}" in w.columns:
         base = w[f"spd_{first_mark}"]
         prelim = 100.0 * (base / base.median(skipna=True))
@@ -233,16 +240,32 @@ def build_metrics_manual(df_in: pd.DataFrame, actual_distance_m: float, grid_mar
     else:
         w["F200_idx"] = np.nan
 
-    # ---------- tsSPI = sustained mid race (exclude first 200 & last 600) ----------
-    # With explicit 0 marker, last 600 means markers [600,400,200,0] => drop last three 200s + finish.
+    # ---------- tsSPI (exclude first 200 & last 600) ----------
+    # For pure 200m splits, "last 600" = last three 200m segments: 600–400, 400–200, 200–Finish.
+    # We exclude those and the first 200; average over the remaining mid-race segments.
+    # Build an ordered list of segment starts including the artificial 0 (finish) to reason about ends.
+    ordered_starts = markers.copy()
+    if has_finish and (0 not in ordered_starts):
+        ordered_starts.append(0)
+    ordered_starts = sorted(set(ordered_starts), reverse=True)
+
     def tsspi_avg(row):
-        mids = [m for m in seg_markers if m not in (first_mark, 400, 200, 0)]
-        # adaptive fallback for very short races
-        if len(mids) < 2:
-            mids = [m for m in seg_markers if m not in (first_mark, 200, 0)]
-        if len(mids) < 1:
-            mids = [m for m in seg_markers if m not in (first_mark, 0)]
-        vals = [row.get(f"spd_{m}") for m in mids]
+        if len(markers) == 0:
+            return np.nan
+        mids = markers[1:]  # drop first 200
+        # drop last three 200m blocks if finish is present; else drop last two (up to 200)
+        tail_drop = 3 if has_finish else 2
+        if len(mids) > tail_drop:
+            mids = mids[:-tail_drop]
+        else:
+            # adaptive fallback windows
+            if len(mids) >= 2:
+                mids = mids[:-1]
+            elif len(mids) == 1:
+                mids = mids
+            else:
+                return np.nan
+        vals = [row.get(f"spd_{m}") for m in mids if f"spd_{m}" in row.index]
         vals = [v for v in vals if pd.notna(v)]
         return np.nan if not vals else float(np.mean(vals))
 
@@ -255,22 +278,26 @@ def build_metrics_manual(df_in: pd.DataFrame, actual_distance_m: float, grid_mar
     tsSPI = variance_floor(tsSPI)
     w["tsSPI"] = tsSPI
 
-    # ---------- Accel = 600→200 (adaptive up to 3 segments before 200) ----------
-    pre_marks = [m for m in seg_markers if m > 0]  # everything before finish
-    # typical window: [600, 400, 200] if present
-    accel_candidates = [m for m in pre_marks if m <= 600 and m >= 200]
-    accel_candidates = sorted(set(accel_candidates), reverse=True)  # [600,400,200]
-    if not accel_candidates:
-        # fallback: use up to the last 2 segments before finish
-        accel_candidates = sorted(pre_marks)[-2:] if len(pre_marks) >= 2 else pre_marks[-1:]
-        accel_candidates = list(reversed(accel_candidates))  # keep late-first ordering
+    # ---------- Accel: last 600→200 (three 200m segments immediately before the last 200) ----------
+    # Example: … 800, 600, 400, 200, (Finish). Accel window = 800, 600, 400 (or 600, 400, 200 if finish absent).
+    def accel_window(starts):
+        if has_finish:
+            # exclude the last 200 (which is 200->Finish at start=200), take the three before it
+            if 200 in starts:
+                idx = starts.index(200)
+                return [m for m in starts[idx+1:idx+4] if m > 0]  # previous three starts toward early race
+        # fallback: last 3 available above the smallest start
+        tail = sorted([m for m in markers if m > 0])[-3:]
+        return tail
+
+    accel_win = accel_window(ordered_starts)
 
     def mean_marks(row, marks):
-        vals = [row.get(f"spd_{m}") for m in marks]
+        vals = [row.get(f"spd_{m}") for m in marks if f"spd_{m}" in row.index]
         vals = [v for v in vals if pd.notna(v)]
         return np.nan if not vals else float(np.mean(vals))
 
-    w["_accel_spd"] = w.apply(lambda r: mean_marks(r, accel_candidates), axis=1)
+    w["_accel_spd"] = w.apply(lambda r: mean_marks(r, accel_win), axis=1)
     a_med = w["_accel_spd"].median(skipna=True)
     w["Accel_raw"] = 100.0 * (w["_accel_spd"] / a_med)
     center_a, n_a = shrink_center(w["Accel_raw"])
@@ -279,18 +306,22 @@ def build_metrics_manual(df_in: pd.DataFrame, actual_distance_m: float, grid_mar
     Accel = variance_floor(Accel)
     w["Accel"] = Accel
 
-    # ---------- Grind = last 200 (200→Finish) ----------
-    if "spd_0" in w.columns:
+    # ---------- Grind: last 200 (200 → Finish) ----------
+    # Uses spd_0 when Finish_Time/0_Time is present; else uses spd_200 (200→0 missing → use 200→??) — if absent, NaN.
+    if has_finish and "spd_0" in w.columns:
         g_base = w["spd_0"]
-        g_med = g_base.median(skipna=True)
-        w["Grind_raw"] = 100.0 * (g_base / g_med)
-        center_g, n_g = shrink_center(w["Grind_raw"])
-        Grind = 100.0 * (g_base / (center_g / 100.0 * g_med))
-        Grind = 100.0 + dispersion_equalizer(Grind - 100.0, n_g)
-        Grind = variance_floor(Grind)
-        w["Grind"] = Grind
+    elif "spd_200" in w.columns:
+        g_base = w["spd_200"]  # best-effort fallback if finish is missing
     else:
-        w["Grind"] = np.nan
+        g_base = pd.Series(np.nan, index=w.index)
+
+    g_med = g_base.median(skipna=True)
+    w["Grind_raw"] = 100.0 * (g_base / g_med)
+    center_g, n_g = shrink_center(w["Grind_raw"])
+    Grind = 100.0 * (g_base / (center_g / 100.0 * g_med))
+    Grind = 100.0 + dispersion_equalizer(Grind - 100.0, n_g)
+    Grind = variance_floor(Grind)
+    w["Grind"] = Grind
 
     # ---------- PI v3.1 (distance- & context-aware weights, robust 0–10 scaling) ----------
     acc_med = w["Accel"].median(skipna=True)
@@ -317,7 +348,7 @@ def build_metrics_manual(df_in: pd.DataFrame, actual_distance_m: float, grid_mar
         sigma = 0.75
     w["PI"] = (5.0 + 2.2 * (centered / sigma)).clip(0.0, 10.0).round(2)
 
-    # ---------- GCI (0–10) — aligned with same worldview ----------
+    # ---------- GCI (0–10) — aligned with distance+context weights ----------
     acc_med_g = w["Accel"].median(skipna=True)
     grd_med_g = w["Grind"].median(skipna=True)
     Wg = pi_weights_distance_and_context(float(actual_distance_m), acc_med_g, grd_med_g)
@@ -340,6 +371,7 @@ def build_metrics_manual(df_in: pd.DataFrame, actual_distance_m: float, grid_mar
 
     gci_vals = []
     for _, r in w.iterrows():
+        # T = closeness to winner on raw race time
         T = 0.0
         if winner_time is not None and pd.notna(r.get("RaceTime_s")):
             d = float(r["RaceTime_s"]) - winner_time
@@ -358,7 +390,7 @@ def build_metrics_manual(df_in: pd.DataFrame, actual_distance_m: float, grid_mar
             dev = (abs(acc - 100.0) + abs(grd - 100.0)) / 2.0
             EFF = clamp(1.0 - dev / 8.0, 0.0, 1.0)
 
-        score01 = (wT * T) + (wPACE * LQ) + (wSS * SS) + (wEFF * EFF)
+        score01 = (wT * T) + (wPACE * SS * 0 + wPACE * LQ) + (wSS * SS) + (wEFF * EFF)  # (explicit + LQ path)
         gci_vals.append(round(10.0 * score01, 3))
 
     w["GCI"] = gci_vals
@@ -368,11 +400,11 @@ def build_metrics_manual(df_in: pd.DataFrame, actual_distance_m: float, grid_mar
         if c in w.columns:
             w[c] = w[c].round(3)
 
-    return w, seg_markers
+    return w, markers, has_finish, finish_col
 
-# ---- compute metrics
+# ---- compute metrics safely
 try:
-    metrics, seg_markers = build_metrics_manual(work, float(race_distance_input), grid_markers)
+    metrics, markers, has_finish, finish_col = build_metrics(work, float(race_distance_input))
 except Exception as e:
     st.error("Metric computation failed.")
     if DEBUG:
@@ -380,7 +412,7 @@ except Exception as e:
     st.stop()
 
 # ======================= Metrics table =====================
-st.markdown("## Sectional Metrics (Manual PI v3.1 & GCI)")
+st.markdown("## Sectional Metrics (PI v3.1 & GCI)")
 show_cols = ["Horse", "Finish_Pos", "RaceTime_s", "F200_idx", "tsSPI", "Accel", "Grind", "PI", "GCI"]
 for c in show_cols:
     if c not in metrics.columns:
@@ -389,11 +421,82 @@ st.dataframe(metrics[show_cols].sort_values(["PI","Finish_Pos"], ascending=[Fals
              use_container_width=True)
 
 # ===================== Sectional Shape Map — Accel vs Grind =====================
-st.markdown("## Sectional Shape Map — Accel (600→200) vs Grind (200→Finish)")
+st.markdown("## Sectional Shape Map — Accel (late kick window) vs Grind (last 200)")
 
-needed_cols = {"Horse", "Accel", "Grind", "tsSPI", "PI"}
-if not needed_cols.issubset(metrics.columns):
-    st.warning("Shape Map: required columns missing: " + ", ".join(sorted(needed_cols - set(metrics.columns))))
+def _repel_labels_builtin(ax, x, y, labels, *,
+                          init_shift=0.18, k_attract=0.006, k_repel=0.012,
+                          max_iter=250):
+    import numpy as np
+    trans = ax.transData
+    renderer = ax.figure.canvas.get_renderer()
+    xy = np.column_stack([x, y]).astype(float)
+    offs = np.zeros_like(xy)
+    for i, (xi, yi) in enumerate(xy):
+        offs[i] = [init_shift if xi >= 0 else -init_shift,
+                   init_shift if yi >= 0 else -init_shift]
+
+    texts, lines = [], []
+    for (xi, yi), (dx, dy), lab in zip(xy, offs, labels):
+        t = ax.text(xi+dx, yi+dy, lab, fontsize=8.6,
+                    va="center", ha="left",
+                    bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="none", alpha=0.70))
+        texts.append(t)
+        ln = Line2D([xi, xi+dx], [yi, yi+dy], lw=0.75, color="black", alpha=0.9)
+        ax.add_line(ln); lines.append(ln)
+
+    inv = ax.transData.inverted()
+    for _ in range(max_iter):
+        moved = False
+        bbs = [t.get_window_extent(renderer=renderer).expanded(1.02, 1.15) for t in texts]
+        for i in range(len(texts)):
+            for j in range(i+1, len(texts)):
+                if not bbs[i].overlaps(bbs[j]): 
+                    continue
+                ci = ((bbs[i].x0+bbs[i].x1)/2, (bbs[i].y0+bbs[i].y1)/2)
+                cj = ((bbs[j].x0+bbs[j].x1)/2, (bbs[j].y0+bbs[j].y1)/2)
+                vx, vy = ci[0]-cj[0], ci[1]-cj[1]
+                if vx == 0 and vy == 0: vx = 1.0
+                n = (vx**2 + vy**2)**0.5
+                dx, dy = (vx/n)*k_repel*72, (vy/n)*k_repel*72
+                for t, s in ((texts[i], +1), (texts[j], -1)):
+                    tx, ty = t.get_position()
+                    px = trans.transform((tx, ty)) + s*np.array([dx, dy])
+                    t.set_position(inv.transform(px)); moved = True
+        for t, (xi, yi) in zip(texts, xy):
+            tx, ty = t.get_position()
+            pt = trans.transform((tx, ty)); pp = trans.transform((xi, yi))
+            d = ((pt[0]-pp[0])**2 + (pt[1]-pp[1])**2)**0.5
+            tgt = 25.0
+            if abs(d - tgt) > 1.0:
+                v = (pt - pp) / (d + 1e-9)
+                pt2 = pt + v * (0.6 * (tgt - d))
+                t.set_position(inv.transform(pt2)); moved = True
+        if not moved:
+            break
+    for t, (xi, yi) in zip(texts, xy):
+        tx, ty = t.get_position()
+        ax.plot([xi, tx],[yi, ty], lw=0.75, color="black", alpha=0.9)
+
+def label_points_neatly(ax, x, y, names):
+    try:
+        from adjustText import adjust_text
+        texts = []
+        for xi, yi, nm in zip(x, y, names):
+            texts.append(ax.text(xi, yi, nm, fontsize=8.6,
+                                 bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="none", alpha=0.70)))
+        adjust_text(
+            texts, x=x, y=y, ax=ax,
+            only_move={'points': 'y', 'text': 'xy'},
+            force_points=0.6, force_text=0.7,
+            expand_text=(1.05, 1.15), expand_points=(1.05, 1.15),
+            arrowprops=dict(arrowstyle="->", lw=0.75, color="black", alpha=0.9, shrinkA=0, shrinkB=3)
+        )
+    except Exception:
+        _repel_labels_builtin(ax, x, y, names)
+
+need_cols = {"Horse", "Accel", "Grind", "tsSPI", "PI"}
+if not need_cols.issubset(metrics.columns):
+    st.warning("Shape Map: required columns missing: " + ", ".join(sorted(need_cols - set(metrics.columns))))
 else:
     dfm = metrics.loc[:, ["Horse", "Accel", "Grind", "tsSPI", "PI"]].copy()
     for c in ["Accel", "Grind", "tsSPI", "PI"]:
@@ -413,253 +516,158 @@ else:
         cv = dfm["tsSPIΔ"].to_numpy()
         piv = dfm["PI"].fillna(0).to_numpy()
 
-        if not np.isfinite(xv).any() or not np.isfinite(yv).any():
-            st.info("No valid sectional differentials available for this race.")
+        try:
+            span = float(np.nanmax([np.nanmax(np.abs(xv)), np.nanmax(np.abs(yv))]))
+        except Exception:
+            span = 1.0
+        if not np.isfinite(span) or span <= 0:
+            span = 1.0
+        lim = max(4.5, float(np.ceil(span / 1.5) * 1.5))
+
+        DOT_MIN, DOT_MAX = 40.0, 140.0
+        pmin, pmax = float(np.nanmin(piv)), float(np.nanmax(piv))
+        if not np.isfinite(pmin) or not np.isfinite(pmax) or abs(pmax - pmin) < 1e-9:
+            sizes = np.full_like(xv, DOT_MIN)
         else:
-            try:
-                span = float(np.nanmax([np.nanmax(np.abs(xv)), np.nanmax(np.abs(yv))]))
-            except Exception:
-                span = 1.0
-            if not np.isfinite(span) or span <= 0:
-                span = 1.0
-            lim = max(4.5, float(np.ceil(span / 1.5) * 1.5))
+            sizes = DOT_MIN + (piv - pmin) / (pmax - pmin) * (DOT_MAX - DOT_MIN)
 
-            DOT_MIN, DOT_MAX = 40.0, 140.0
-            pmin, pmax = float(np.nanmin(piv)), float(np.nanmax(piv))
-            if not np.isfinite(pmin) or not np.isfinite(pmax) or abs(pmax - pmin) < 1e-9:
-                sizes = np.full_like(xv, DOT_MIN)
-            else:
-                sizes = DOT_MIN + (piv - pmin) / (pmax - pmin) * (DOT_MAX - DOT_MIN)
+        fig, ax = plt.subplots(figsize=(7.6, 6.4))
 
-            fig, ax = plt.subplots(figsize=(7.6, 6.4))
+        TINT = 0.06
+        ax.add_patch(Rectangle((0, 0),  lim,  lim, facecolor="#4daf4a", alpha=TINT, edgecolor="none"))
+        ax.add_patch(Rectangle((-lim,0), lim,  lim, facecolor="#377eb8", alpha=TINT, edgecolor="none"))
+        ax.add_patch(Rectangle((0,-lim), lim, lim, facecolor="#ff7f00", alpha=TINT, edgecolor="none"))
+        ax.add_patch(Rectangle((-lim,-lim),lim, lim, facecolor="#984ea3", alpha=TINT, edgecolor="none"))
 
-            TINT = 0.06
-            ax.add_patch(Rectangle((0, 0),  lim,  lim, facecolor="#4daf4a", alpha=TINT, edgecolor="none"))
-            ax.add_patch(Rectangle((-lim,0), lim,  lim, facecolor="#377eb8", alpha=TINT, edgecolor="none"))
-            ax.add_patch(Rectangle((0,-lim), lim, lim, facecolor="#ff7f00", alpha=TINT, edgecolor="none"))
-            ax.add_patch(Rectangle((-lim,-lim),lim, lim, facecolor="#984ea3", alpha=TINT, edgecolor="none"))
+        ax.axvline(0, color="gray", lw=1.3, ls=(0, (3, 3)))
+        ax.axhline(0, color="gray", lw=1.3, ls=(0, (3, 3)))
 
-            ax.axvline(0, color="gray", lw=1.3, ls=(0, (3, 3)))
-            ax.axhline(0, color="gray", lw=1.3, ls=(0, (3, 3)))
+        vmin = float(np.nanmin(cv)) if np.isfinite(cv).any() else -1.0
+        vmax = float(np.nanmax(cv)) if np.isfinite(cv).any() else  1.0
+        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
+            vmin, vmax = -1.0, 1.0
+        norm = TwoSlopeNorm(vcenter=0.0, vmin=vmin, vmax=vmax)
 
-            vmin = float(np.nanmin(cv)) if np.isfinite(cv).any() else -1.0
-            vmax = float(np.nanmax(cv)) if np.isfinite(cv).any() else  1.0
-            if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
-                vmin, vmax = -1.0, 1.0
-            norm = TwoSlopeNorm(vcenter=0.0, vmin=vmin, vmax=vmax)
+        sc = ax.scatter(
+            xv, yv, s=sizes, c=cv, cmap="coolwarm", norm=norm,
+            edgecolor="black", linewidth=0.6, alpha=0.95
+        )
 
-            sc = ax.scatter(
-                xv, yv, s=sizes, c=cv, cmap="coolwarm", norm=norm,
-                edgecolor="black", linewidth=0.6, alpha=0.95
-            )
+        label_points_neatly(ax, xv, yv, names)
 
-            # Simple non-overlapping label helper
-            def label_points_neatly(ax, x, y, names):
-                try:
-                    from adjustText import adjust_text
-                    texts = []
-                    for xi, yi, nm in zip(x, y, names):
-                        texts.append(ax.text(xi, yi, nm, fontsize=8.6,
-                                             bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="none", alpha=0.70)))
-                    adjust_text(
-                        texts, x=x, y=y, ax=ax,
-                        only_move={'points': 'y', 'text': 'xy'},
-                        force_points=0.6, force_text=0.7,
-                        expand_text=(1.05, 1.15), expand_points=(1.05, 1.15),
-                        arrowprops=dict(arrowstyle="->", lw=0.75, color="black", alpha=0.9, shrinkA=0, shrinkB=3)
-                    )
-                except Exception:
-                    for xi, yi, nm in zip(x, y, names):
-                        ax.text(xi+0.2, yi+0.2, nm, fontsize=8.6,
-                                bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="none", alpha=0.70))
+        ax.set_xlim(-lim, lim); ax.set_ylim(-lim, lim)
+        ax.set_xlabel("Acceleration vs field (points)  →")
+        ax.set_ylabel("Grind vs field (points)  ↑")
+        ax.set_title("Quadrants: +X = late acceleration; +Y = last 200 grind. Colour = tsSPI (mid-race) deviation")
 
-            label_points_neatly(ax, xv, yv, names)
+        s_ex = [DOT_MIN, 0.5*(DOT_MIN+DOT_MAX), DOT_MAX]
+        h_ex = [Line2D([0],[0], marker='o', color='w', markerfacecolor='gray',
+                       markersize=np.sqrt(s/np.pi), markeredgecolor='black') for s in s_ex]
+        ax.legend(h_ex, ["PI: low", "PI: mid", "PI: high"],
+                  loc="upper left", frameon=False, fontsize=8)
 
-            ax.set_xlim(-lim, lim); ax.set_ylim(-lim, lim)
-            ax.set_xlabel("Acceleration vs field (points)  →")
-            ax.set_ylabel("Grind vs field (points)  ↑")
-            ax.set_title("Quadrants: +X = late acceleration; +Y = strong last 200. Colour = tsSPI deviation")
+        cbar = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label("tsSPI − 100")
 
-            s_ex = [DOT_MIN, 0.5*(DOT_MIN+DOT_MAX), DOT_MAX]
-            h_ex = [Line2D([0],[0], marker='o', color='w', markerfacecolor='gray',
-                           markersize=np.sqrt(s/np.pi), markeredgecolor='black') for s in s_ex]
-            ax.legend(h_ex, ["PI: low", "PI: mid", "PI: high"],
-                      loc="upper left", frameon=False, fontsize=8)
+        ax.grid(True, linestyle=":", alpha=0.25)
+        st.pyplot(fig)
 
-            cbar = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
-            cbar.set_label("tsSPI − 100")
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=200, bbox_inches="tight")
+        st.download_button("Download shape map (PNG)", buf.getvalue(),
+                           file_name="shape_map.png", mime="image/png")
 
-            ax.grid(True, linestyle=":", alpha=0.25)
-            st.pyplot(fig)
+# ======================= Visual 2: Pace Curve — includes Finish split =================
+st.markdown("## Pace Curve — field average (black) + Top 8 finishers (includes Finish split)")
 
-            buf = io.BytesIO()
-            fig.savefig(buf, format="png", dpi=200, bbox_inches="tight")
-            st.download_button("Download shape map (PNG)", buf.getvalue(),
-                               file_name="shape_map.png", mime="image/png")
+# Build ordered segments as (start_m, end_m, length_m); ensure the last is 200→Finish if provided.
+seg_starts = markers.copy()
+if has_finish and (0 not in seg_starts):
+    seg_starts.append(0)
+seg_starts = sorted(set(seg_starts), reverse=True)
 
-            st.caption(
-                "Each bubble is a runner. Size = PI (bigger = stronger overall). "
-                "X: late acceleration (600→200) vs field; Y: last-200 grind vs field. "
-                "Colour shows cruise strength (tsSPI vs field): red = faster mid-race, blue = slower."
-            )
-
-# ======================= Pace Curve — includes Finish split =================
-st.markdown("## Pace Curve — field average (black) + Top 8 finishers (Finish split included)")
-
-# Ensure we have a synthetic 0_Time from Finish_Time for the last 200 → Finish
-work["0_Time"] = as_num(work.get("Finish_Time", np.nan))
-
-# Build ordered markers including 0 for finish, e.g. [1000, 800, 600, 400, 200, 0]
-markers = sorted(set(grid_markers + [0]), reverse=True)
-
-if len(markers) < 2:
-    st.info("Not enough segments to draw the pace curve.")
+if len(seg_starts) == 0:
+    st.info("Not enough *_Time columns to draw the pace curve.")
 else:
-    # Build (start, end, length) pairs; last pair must be (200, 0, 200)
     segs = []
-    for i, start in enumerate(markers[:-1]):
-        end = markers[i + 1]
-        seg_len = float(start - end) if end > 0 else 200.0  # force last split to be 200→Finish
-        if seg_len > 0:
-            segs.append((start, end, seg_len))
+    for i, start in enumerate(seg_starts):
+        end = seg_starts[i + 1] if (i + 1) < len(seg_starts) else None
+        if end is None:
+            # no trailing segment beyond finish; skip
+            continue
+        seg_len = float(start - end)
+        # The final actual segment should be 200→0 (Finish) with start=200,end=0
+        if start == 200 and end == 0:
+            seg_len = 200.0
+        if seg_len <= 0:
+            continue
+        segs.append((start, end, seg_len))
 
-    if not segs:
+    if len(segs) == 0:
         st.info("Could not infer segment lengths.")
     else:
-        # Assemble times and speeds for each segment, including 0_Time for finish
-        times_df = pd.DataFrame(index=work.index)
-        for (start, end, seg_len) in segs:
-            col = f"{start}_Time" if end > 0 else "0_Time"
-            times_df[col] = as_num(work.get(col, np.nan))
+        seg_cols = []
+        for (start, end, _) in segs:
+            if start == 200 and end == 0 and has_finish:
+                seg_cols.append(finish_col)  # use Finish_Time column
+            else:
+                seg_cols.append(f"{start}_Time")
 
+        times_df = work[seg_cols].apply(pd.to_numeric, errors="coerce")
         speed_df = pd.DataFrame(index=work.index)
-        for (start, end, seg_len) in segs:
-            col = f"{start}_Time" if end > 0 else "0_Time"
-            speed_df[col] = seg_len / times_df[col]
+        for (start, end, seg_len), col in zip(segs, seg_cols):
+            speed_df[f"{start}->{end}"] = seg_len / times_df[col]
 
-        # Field average
         field_avg = speed_df.mean(axis=0).to_numpy()
 
-        # Choose top 8: finish pos if present, else PI
+        # choose top 8: finish pos if present, else PI
         if "Finish_Pos" in metrics.columns and metrics["Finish_Pos"].notna().any():
             top8 = metrics.sort_values("Finish_Pos").head(8)
         else:
             top8 = metrics.sort_values("PI", ascending=False).head(8)
 
-        # X axis labels (show "200–Finish" for the last)
-        def seg_label(s, e):
-            return "200–Finish" if e == 0 else f"{int(s)}–{int(e)}m"
-        x_labels = [seg_label(s, e) for (s, e, _) in segs]
         x_idx = list(range(len(segs)))
+        x_labels = []
+        for (start, end, _) in segs:
+            if start == 200 and end == 0:
+                x_labels.append("200–FIN")
+            else:
+                x_labels.append(f"{int(start)}–{int(end)}m")
 
-        fig2, ax2 = plt.subplots(figsize=(8.6, 5.2))
-        # Field average — thicker black
+        fig2, ax2 = plt.subplots(figsize=(8.8, 5.2))
         ax2.plot(x_idx, field_avg, linewidth=2.2, color="black", label="Field average", marker=None)
 
-        # Overlay top 8 — thin lines & small markers
         palette = color_cycle(len(top8))
         for i, (_, r) in enumerate(top8.iterrows()):
-            # Build a row-wise time vector that includes 0_Time for finish
-            row_times = {}
-            for (start, end, seg_len) in segs:
-                col = f"{start}_Time" if end > 0 else "0_Time"
-                # Try to read from the original work row for this Horse (if names match), fallback to metrics
-                if "Horse" in work.columns and "Horse" in metrics.columns:
-                    wrow = work[work["Horse"] == r.get("Horse")]
-                    if not wrow.empty and col in wrow.columns:
-                        row_times[col] = as_num(wrow.iloc[0].get(col))
-                    else:
-                        row_times[col] = as_num(r.get(col, np.nan))
-                else:
-                    row_times[col] = as_num(r.get(col, np.nan))
+            # find raw times by name in original table if available
+            if "Horse" in work.columns and "Horse" in metrics.columns:
+                row0 = work[work["Horse"] == r.get("Horse")]
+                row_times = row0.iloc[0] if not row0.empty else r
+            else:
+                row_times = r
 
             y_vals = []
-            for (start, end, seg_len) in segs:
-                col = f"{start}_Time" if end > 0 else "0_Time"
+            for (start, end, seg_len), col in zip(segs, seg_cols):
                 t = pd.to_numeric(row_times.get(col, np.nan), errors="coerce")
                 y_vals.append(seg_len / t if pd.notna(t) and t > 0 else np.nan)
 
-            ax2.plot(x_idx, y_vals, linewidth=1.1, marker="o", markersize=2.5,
+            ax2.plot(x_idx, y_vals, linewidth=1.1, marker="o", markersize=2.6,
                      label=str(r.get("Horse", "")), color=palette[i])
 
         ax2.set_xticks(x_idx)
         ax2.set_xticklabels(x_labels, rotation=45, ha="right")
         ax2.set_ylabel("Speed (m/s)")
-        ax2.set_title("Pace over 200 m segments (left = early, right = home straight) — includes 200→Finish")
+        ax2.set_title("Pace over 200 m segments (left = early, right = home straight, includes 200→Finish)")
         ax2.grid(True, linestyle="--", alpha=0.30)
         ax2.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=3, frameon=False, fontsize=9)
         st.pyplot(fig2)
-
-# ======================= Top-8 PI — stacked contributions =================
-st.markdown("## Top-8 PI — stacked contributions")
-
-acc_med_for_bars = metrics["Accel"].median(skipna=True)
-grd_med_for_bars = metrics["Grind"].median(skipna=True)
-PI_W_BARS = pi_weights_distance_and_context(float(race_distance_input), acc_med_for_bars, grd_med_for_bars)
-
-def parts_scaled_to_total(row, total_pi, weights, zero_floor=True):
-    raw = {
-        "F200_idx": weights["F200_idx"] * (float(row.get("F200_idx", 100.0)) - 100.0),
-        "tsSPI":    weights["tsSPI"]    * (float(row.get("tsSPI",    100.0)) - 100.0),
-        "Accel":    weights["Accel"]    * (float(row.get("Accel",    100.0)) - 100.0),
-        "Grind":    weights["Grind"]    * (float(row.get("Grind",    100.0)) - 100.0),
-    }
-    if zero_floor:
-        raw = {k: max(0.0, v) for k, v in raw.items()}
-    s = sum(raw.values())
-    if not np.isfinite(total_pi) or total_pi <= 0 or not np.isfinite(s) or s <= 0:
-        return {"F200_idx": 0.0, "tsSPI": 0.0, "Accel": 0.0, "Grind": 0.0}
-    scale = float(total_pi) / float(s)
-    return {k: v * scale for k, v in raw.items()}
-
-top8_pi = metrics.sort_values(["PI","Finish_Pos"], ascending=[False, True]).head(8).copy()
-if not top8_pi.empty:
-    horses = []
-    stacks = {"F200_idx": [], "tsSPI": [], "Accel": [], "Grind": []}
-    totals = []
-    is_winner = []
-
-    for _, r in top8_pi.iterrows():
-        total_pi = float(r.get("PI", 0.0))
-        parts = parts_scaled_to_total(r, total_pi, PI_W_BARS, zero_floor=True)
-        for k in stacks:
-            stacks[k].append(parts[k])
-        totals.append(total_pi)
-        horses.append(str(r.get("Horse", "")))
-        is_winner.append(int(r.get("Finish_Pos", 0)) == 1)
-
-    fig3, ax3 = plt.subplots(figsize=(max(7.5, 0.95*len(horses)), 4.8))
-    x = np.arange(len(horses))
-    palette = {"F200_idx": "#6baed6", "tsSPI": "#9e9ac8", "Accel": "#74c476", "Grind": "#fd8d3c"}
-
-    bottoms = np.zeros(len(horses))
-    for key, label in [("F200_idx","F200"), ("tsSPI","tsSPI"), ("Accel","Accel"), ("Grind","Grind")]:
-        vals = np.array(stacks[key], dtype=float)
-        ax3.bar(x, vals, bottom=bottoms, label=label, color=palette[key], edgecolor="black", linewidth=0.4)
-        bottoms += vals
-
-    ymax = max(0.1, max(totals)*1.20)
-    for i, tot in enumerate(totals):
-        if is_winner[i]:
-            ax3.add_patch(plt.Rectangle((i-0.5, 0), 1.0, max(tot, bottoms[i]), fill=False, lw=2.0, ec="#d4af37"))
-            horses[i] = f"★ {horses[i]}"
-        ax3.text(i, tot + ymax*0.03, f"{tot:.2f}", ha="center", va="bottom", fontsize=9)
-
-    ax3.set_xticks(x); ax3.set_xticklabels(horses, rotation=45, ha="right")
-    ax3.set_ylim(0, ymax)
-    ax3.set_ylabel("PI (stacked contributions)")
-    ax3.grid(axis="y", linestyle="--", alpha=0.3)
-    ax3.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=4, frameon=False)
-    st.pyplot(fig3)
-    st.caption("Slices rescaled to sum exactly to each horse’s PI. ★ = race winner.")
-else:
-    st.info("No PI values available to plot the stacked contributions.")
 
 # ======================= Hidden Horses (v2) =================
 st.markdown("## Hidden Horses (v2)")
 
 hh = metrics.copy()
 
+# ---------- 1) SOS (robust sectional outlier) ----------
 need_cols = {"tsSPI", "Accel", "Grind"}
 if need_cols.issubset(hh.columns) and len(hh) > 0:
     ts_w = winsorize(pd.to_numeric(hh["tsSPI"], errors="coerce"))
@@ -685,6 +693,7 @@ if need_cols.issubset(hh.columns) and len(hh) > 0:
 else:
     hh["SOS"] = 0.0
 
+# ---------- 2) ASI² (bias-aware against-shape) ----------
 acc_med = pd.to_numeric(hh.get("Accel"), errors="coerce").median(skipna=True)
 grd_med = pd.to_numeric(hh.get("Grind"), errors="coerce").median(skipna=True)
 bias = (acc_med - 100.0) - (grd_med - 100.0)
@@ -695,19 +704,21 @@ if bias >= 0:
 else:
     hh["ASI2"] = (B * (S).clip(lower=0.0) / 5.0).fillna(0.0)
 
-# Trip friction: late variability over last 3 segments vs mid pace
+# ---------- 3) TFS (trip friction) ----------
+# Use last three segments available relative to the finish, if present; else use as many as available.
 last3 = []
-seg_markers_for_tfs = sorted(set(seg_markers), reverse=False)  # [0, 200, 400, ...]
-near_finish = [m for m in seg_markers_for_tfs if m in (600, 400, 200)]
-last3 = sorted(near_finish, reverse=True)
+tail_candidates = sorted([m for m in markers if m >= 200])[:3]  # closest to finish: 600,400,200 if present
+last3 = sorted(tail_candidates, reverse=True)
 
-def tfs_row(r):
-    spds = [r.get(f"spd_{m}") for m in last3]
+def tfs_row(row):
+    spds = [row.get(f"spd_{m}") for m in last3 if f"spd_{m}" in row.index]
+    if has_finish and "spd_0" in row.index:
+        spds.append(row.get("spd_0"))
     spds = [s for s in spds if pd.notna(s)]
     if len(spds) < 2:
         return np.nan
     sigma = float(np.std(spds, ddof=0))
-    mid = float(r.get("_mid_spd", np.nan))
+    mid = float(row.get("_mid_spd", np.nan))
     if not np.isfinite(mid) or mid <= 0:
         return np.nan
     return 100.0 * (sigma / mid)
@@ -715,10 +726,10 @@ def tfs_row(r):
 hh["TFS"] = hh.apply(tfs_row, axis=1)
 
 # Distance-aware TFS gate
-rounded_distance_for_gate = int(np.ceil(float(race_distance_input) / 200.0) * 200)
-if rounded_distance_for_gate <= 1200:
+rounded_distance = int(np.ceil(float(race_distance_input) / 200.0) * 200)
+if rounded_distance <= 1200:
     gate = 4.0
-elif rounded_distance_for_gate < 1800:
+elif rounded_distance < 1800:
     gate = 3.5
 else:
     gate = 3.0
@@ -730,6 +741,7 @@ def tfs_plus(x):
 
 hh["TFS_plus"] = hh["TFS"].apply(tfs_plus)
 
+# ---------- 4) UEI ----------
 def uei_row(r):
     ts = pd.to_numeric(r.get("tsSPI"), errors="coerce")
     ac = pd.to_numeric(r.get("Accel"), errors="coerce")
@@ -747,6 +759,7 @@ def uei_row(r):
 
 hh["UEI"] = hh.apply(uei_row, axis=1)
 
+# ---------- 5) HiddenScore v2 (0..3) ----------
 hidden = (
     0.55 * pd.to_numeric(hh["SOS"], errors="coerce").fillna(0.0) +
     0.30 * pd.to_numeric(hh["ASI2"], errors="coerce").fillna(0.0) +
@@ -763,6 +776,7 @@ h_sigma = max(1e-6, 1.4826 * h_mad)
 
 hh["HiddenScore"] = (1.2 + (hidden - h_med) / (2.5 * h_sigma)).clip(lower=0.0, upper=3.0)
 
+# ---------- 6) Tiering & Notes ----------
 def hh_tier(s):
     if pd.isna(s): return ""
     if s >= 1.8:   return "🔥 Top Hidden"
@@ -789,6 +803,7 @@ def hh_note(r):
 
 hh["Note"] = hh.apply(hh_note, axis=1)
 
+# ---------- 7) Display ----------
 cols_hh = [
     "Horse", "Finish_Pos", "PI", "GCI",
     "tsSPI", "Accel", "Grind",
@@ -805,7 +820,7 @@ st.dataframe(
 )
 
 st.caption(
-    "Manual Mode: Enter 200 m split times ending with **Finish_Time** (200→Finish). "
-    "F200_idx = first 200 m; tsSPI excludes first 200 & last 600; Accel = 600→200; Grind = last 200 (finish). "
-    "PI v3.1 uses distance- & context-aware weights; GCI is aligned; Hidden Horses v2 highlights sectional standouts."
+    "Notes — Upload uses **200 m splits** and **includes the 200→Finish split** (`Finish_Time` or `0_Time`). "
+    "F200 = first 200 m; tsSPI excludes first 200 and last 600; Accel = 600→200 window; Grind = last 200 (to Finish). "
+    "PI v3.1 uses distance- & context-aware weights; GCI aligns to the same worldview."
 )
