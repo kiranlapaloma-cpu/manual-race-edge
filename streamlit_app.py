@@ -69,6 +69,75 @@ def _dbg(label, obj=None):
         if obj is not None:
             st.write(obj)
 
+# ======================= Column normalizer (NEW) =======================
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Accepts common variants and renames to the app's canonical schema:
+      - '<meters>mTime', '<meters>_Time', '<meters> Time'  →  '<meters>_Time'
+      - 'FinishSplit', 'FinalSplit', 'Last200'             →  '0_Time'        (200→Finish split)
+      - 'FinishTime', 'FinalTime'                          →  'Finish_Time'   (total time; optional)
+      - 'FinishPos', 'Position', 'Pos'                     →  'Finish_Pos'
+    """
+    mapping = {}
+    for c in df.columns:
+        s = str(c).strip()
+
+        # 200 m segment times: 1800mTime / 1800_Time / 1800 Time → 1800_Time
+        m = re.match(r'^(\d{3,4})\s*m?[\s_-]*Time$', s, re.IGNORECASE)
+        if m:
+            mapping[c] = f"{int(m.group(1))}_Time"
+            continue
+
+        # finish split variants (200 → Finish)
+        if re.match(r'^(finish\s*split|final\s*split|last\s*200)$', s, re.IGNORECASE):
+            mapping[c] = "0_Time"
+            continue
+
+        # finish time (overall race time) variants
+        if re.match(r'^(finish|final)[\s_-]*time$', s, re.IGNORECASE):
+            mapping[c] = "Finish_Time"
+            continue
+
+        # finishing position
+        if re.match(r'^(finish[\s_-]*pos|position|pos)$', s, re.IGNORECASE):
+            mapping[c] = "Finish_Pos"
+            continue
+
+    out = df.rename(columns=mapping).copy()
+
+    # Optional: convert total Finish_Time like '2:05.02' to seconds (for RaceTime_s fallback)
+    if "Finish_Time" in out.columns:
+        def _to_seconds(v):
+            if pd.isna(v): return np.nan
+            sv = str(v).strip()
+            mm_ss = re.match(r'^(\d+):(\d+(?:\.\d+)?)$', sv)
+            if mm_ss:
+                return int(mm_ss.group(1))*60 + float(mm_ss.group(2))
+            try:
+                return float(sv)
+            except:
+                return np.nan
+        out["Finish_Time"] = out["Finish_Time"].apply(_to_seconds)
+
+    return out
+
+# ======================= Load data =========================
+if not up:
+    st.stop()
+
+try:
+    work = pd.read_csv(up) if up.name.lower().endswith(".csv") else pd.read_excel(up)
+    work = normalize_columns(work)  # <-- NEW
+    st.success("File loaded.")
+except Exception as e:
+    st.error("Failed to read file.")
+    if DEBUG:
+        st.exception(e)
+    st.stop()
+
+st.markdown("### Raw Table (first 12 rows)")
+st.dataframe(work.head(12), use_container_width=True)
+_dbg("Columns", list(work.columns))
 # ======================= Load data =========================
 if not up:
     st.stop()
