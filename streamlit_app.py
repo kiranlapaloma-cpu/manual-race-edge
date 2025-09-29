@@ -77,9 +77,55 @@ except Exception as e:
     st.error("Failed to read file.")
     st.stop()
 
+# ---------- NEW: header normalizer (maps many common variants → canonical) ----------
+import re
+
+def normalize_headers(df: pd.DataFrame, D_m: int) -> pd.DataFrame:
+    rename = {}
+    for col in list(df.columns):
+        c = str(col).strip()
+
+        # 1) Finish position variants → Finish_Pos
+        if re.fullmatch(r'(?i)(finish\s*pos(ition)?|pos(ition)?|fin_pos)', c):
+            rename[col] = "Finish_Pos"; continue
+
+        # 2) Finish time variants → Finish_Time
+        if re.fullmatch(r'(?i)(finish[_\s]*time|finish\s*split|finishsplit|fin(?:ish)?[_\s]*sec(?:onds)?)', c):
+            rename[col] = "Finish_Time"; continue
+
+        # 3) 200m split variants like "1600mTime", "1600 Time", "1600_split", "Time1600m" → "1600_Time"
+        #    We capture the metres and accept Time/Split anywhere
+        m = re.match(r'(?i).*?(\d{3,4})\s*m?\s*[_\s-]?\s*(time|split)?$', c)
+        if m:
+            metres = int(m.group(1))
+            if metres % 200 == 0 and metres >= 200 and metres <= int(D_m):
+                rename[col] = f"{metres}_Time"; continue
+
+        # 4) Specific common camel cases (e.g., 1600mTime without suffix match)
+        m2 = re.match(r'(?i)^(\d{3,4})m(Time|Split)$', c)
+        if m2:
+            metres = int(m2.group(1))
+            rename[col] = f"{metres}_Time"; continue
+
+        # 5) Horse name variants → Horse
+        if re.fullmatch(r'(?i)(horse|runner|name)', c):
+            rename[col] = "Horse"; continue
+
+    out = df.rename(columns=rename)
+
+    # 6) Coerce Finish_Pos if present (strip non-digits like '1st')
+    if "Finish_Pos" in out.columns:
+        out["Finish_Pos"] = (
+            out["Finish_Pos"].astype(str).str.extract(r'(\d+)')[0].astype(float)
+        )
+
+    return out
+
+work = normalize_headers(work, int(race_distance_input))
+
 st.markdown("### Raw Table")
 st.dataframe(work.head(12), use_container_width=True)
-_dbg(DEBUG, "Columns", list(work.columns))
+_dbg(DEBUG, "Columns (normalized)", list(work.columns))
 
 # ======================= Marker discovery (200 m) =========================
 # Convention (200 m):
