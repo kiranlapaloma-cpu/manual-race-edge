@@ -70,48 +70,46 @@ with st.sidebar:
 if not up:
     st.stop()
 
-# ======================= Input handling + HEADER NORMALIZER ====================
+# ======================= Input handling (200m) ====================
 try:
     work = pd.read_csv(up) if up.name.lower().endswith(".csv") else pd.read_excel(up)
     st.success("File loaded.")
-except Exception:
+except Exception as e:
     st.error("Failed to read file.")
     st.stop()
+
+import re
 
 def normalize_headers(df: pd.DataFrame, D_m: int) -> pd.DataFrame:
     rename = {}
     for col in list(df.columns):
         c = str(col).strip()
 
-        # Finish position variants → Finish_Pos
-        if re.fullmatch(r'(?i)(finish\s*pos(ition)?|pos(ition)?|fin_pos|finishpos)', c):
+        # Finish position variants
+        if re.fullmatch(r'(?i)(finish\s*pos(ition)?|pos(ition)?|fin_pos)', c):
             rename[col] = "Finish_Pos"; continue
 
-        # Finish time variants → Finish_Time
+        # Finish time variants
         if re.fullmatch(r'(?i)(finish[_\s]*time|finish\s*split|finishsplit|fin(?:ish)?[_\s]*sec(?:onds)?)', c):
             rename[col] = "Finish_Time"; continue
 
-        # Horse name variants → Horse
-        if re.fullmatch(r'(?i)(horse|runner|name)', c):
-            rename[col] = "Horse"; continue
-
-        # 200m split variants like "1600mTime", "1600 Time", "1600_split", "Time1600m" → "1600_Time"
+        # 200m split variants like "1600mTime"
         m = re.match(r'(?i).*?(\d{3,4})\s*m?\s*[_\s-]?\s*(time|split)?$', c)
         if m:
             metres = int(m.group(1))
             if metres % 200 == 0 and 200 <= metres <= int(D_m):
                 rename[col] = f"{metres}_Time"; continue
 
-        # Strict camel cases (fallback)
-        m2 = re.match(r'(?i)^(\d{3,4})m(Time|Split)$', c)
-        if m2:
-            metres = int(m2.group(1))
-            if metres % 200 == 0:
-                rename[col] = f"{metres}_Time"; continue
+        # Horse name variants
+        if re.fullmatch(r'(?i)(horse|runner|name)', c):
+            rename[col] = "Horse"; continue
 
     out = df.rename(columns=rename)
 
-    # Coerce Finish_Pos if present (handle '1', '1st', etc.)
+    # --- Drop any duplicate columns, keeping the first ---
+    out = out.loc[:, ~out.columns.duplicated()]
+
+    # Coerce Finish_Pos
     if "Finish_Pos" in out.columns:
         out["Finish_Pos"] = (
             out["Finish_Pos"].astype(str).str.extract(r'(\d+)')[0].astype(float)
@@ -123,7 +121,7 @@ work = normalize_headers(work, int(race_distance_input))
 
 st.markdown("### Raw Table")
 st.dataframe(work.head(12), use_container_width=True)
-_dbg(DEBUG, "Columns (normalized)", list(work.columns))
+_dbg(DEBUG, "Columns (normalized, deduped)", list(work.columns))
 
 # ======================= Marker discovery (200 m) =========================
 # X_Time  = time from (X+200) → X    (X ∈ {distance-200, distance-400, …, 200})
