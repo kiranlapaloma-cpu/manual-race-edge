@@ -7,6 +7,7 @@ from matplotlib.colors import TwoSlopeNorm
 from matplotlib.lines import Line2D
 import io
 import math
+import re
 
 # ======================= Page config =======================
 st.set_page_config(page_title="Race Edge — 200m splits | PI v3.1 + GCI + Hidden Horses v2", layout="wide")
@@ -69,51 +70,48 @@ with st.sidebar:
 if not up:
     st.stop()
 
-# ======================= Input handling ====================
+# ======================= Input handling + HEADER NORMALIZER ====================
 try:
     work = pd.read_csv(up) if up.name.lower().endswith(".csv") else pd.read_excel(up)
     st.success("File loaded.")
-except Exception as e:
+except Exception:
     st.error("Failed to read file.")
     st.stop()
-
-# ---------- NEW: header normalizer (maps many common variants → canonical) ----------
-import re
 
 def normalize_headers(df: pd.DataFrame, D_m: int) -> pd.DataFrame:
     rename = {}
     for col in list(df.columns):
         c = str(col).strip()
 
-        # 1) Finish position variants → Finish_Pos
-        if re.fullmatch(r'(?i)(finish\s*pos(ition)?|pos(ition)?|fin_pos)', c):
+        # Finish position variants → Finish_Pos
+        if re.fullmatch(r'(?i)(finish\s*pos(ition)?|pos(ition)?|fin_pos|finishpos)', c):
             rename[col] = "Finish_Pos"; continue
 
-        # 2) Finish time variants → Finish_Time
+        # Finish time variants → Finish_Time
         if re.fullmatch(r'(?i)(finish[_\s]*time|finish\s*split|finishsplit|fin(?:ish)?[_\s]*sec(?:onds)?)', c):
             rename[col] = "Finish_Time"; continue
 
-        # 3) 200m split variants like "1600mTime", "1600 Time", "1600_split", "Time1600m" → "1600_Time"
-        #    We capture the metres and accept Time/Split anywhere
-        m = re.match(r'(?i).*?(\d{3,4})\s*m?\s*[_\s-]?\s*(time|split)?$', c)
-        if m:
-            metres = int(m.group(1))
-            if metres % 200 == 0 and metres >= 200 and metres <= int(D_m):
-                rename[col] = f"{metres}_Time"; continue
-
-        # 4) Specific common camel cases (e.g., 1600mTime without suffix match)
-        m2 = re.match(r'(?i)^(\d{3,4})m(Time|Split)$', c)
-        if m2:
-            metres = int(m2.group(1))
-            rename[col] = f"{metres}_Time"; continue
-
-        # 5) Horse name variants → Horse
+        # Horse name variants → Horse
         if re.fullmatch(r'(?i)(horse|runner|name)', c):
             rename[col] = "Horse"; continue
 
+        # 200m split variants like "1600mTime", "1600 Time", "1600_split", "Time1600m" → "1600_Time"
+        m = re.match(r'(?i).*?(\d{3,4})\s*m?\s*[_\s-]?\s*(time|split)?$', c)
+        if m:
+            metres = int(m.group(1))
+            if metres % 200 == 0 and 200 <= metres <= int(D_m):
+                rename[col] = f"{metres}_Time"; continue
+
+        # Strict camel cases (fallback)
+        m2 = re.match(r'(?i)^(\d{3,4})m(Time|Split)$', c)
+        if m2:
+            metres = int(m2.group(1))
+            if metres % 200 == 0:
+                rename[col] = f"{metres}_Time"; continue
+
     out = df.rename(columns=rename)
 
-    # 6) Coerce Finish_Pos if present (strip non-digits like '1st')
+    # Coerce Finish_Pos if present (handle '1', '1st', etc.)
     if "Finish_Pos" in out.columns:
         out["Finish_Pos"] = (
             out["Finish_Pos"].astype(str).str.extract(r'(\d+)')[0].astype(float)
@@ -128,20 +126,18 @@ st.dataframe(work.head(12), use_container_width=True)
 _dbg(DEBUG, "Columns (normalized)", list(work.columns))
 
 # ======================= Marker discovery (200 m) =========================
-# Convention (200 m):
-#   X_Time  = time from (X+200) → X    (for X ∈ {distance-200, distance-400, …, 200})
-#   Finish_Time = time from 200 → 0
+# X_Time  = time from (X+200) → X    (X ∈ {distance-200, distance-400, …, 200})
+# Finish_Time = time from 200 → 0
 def collect_markers_200(df):
     marks = []
     for c in df.columns:
         if c.endswith("_Time") and c != "Finish_Time":
             try:
                 m = int(c.split("_")[0])
-                marks.append(m)
+                if m % 200 == 0:
+                    marks.append(m)
             except Exception:
                 pass
-    # keep only plausible 200m grid values
-    marks = [m for m in marks if m % 200 == 0]
     return sorted(set(marks), reverse=True)
 
 def sum_times(row, cols):
@@ -150,7 +146,6 @@ def sum_times(row, cols):
     return np.sum(vals) if len(vals) else np.nan
 
 def stage_block_cols_200(start_m, end_m_inclusive, df_cols):
-    """Return existing *_Time columns from start_m down to end_m_inclusive (step 200)."""
     if start_m < end_m_inclusive:
         return []
     want = list(range(int(start_m), int(end_m_inclusive) - 1, -200))
@@ -160,7 +155,6 @@ def stage_speed(row, cols, meters_per_split=200.0):
     if not cols: return np.nan
     tsum = sum_times(row, cols)
     if pd.isna(tsum) or tsum <= 0: return np.nan
-    # distance = 200 m per available split
     dist = meters_per_split * len([c for c in cols if pd.notna(row.get(c))])
     if dist <= 0: return np.nan
     return dist / tsum
@@ -168,21 +162,13 @@ def stage_speed(row, cols, meters_per_split=200.0):
 def grind_speed_200(row):
     tfin = as_num(row.get("Finish_Time"))
     if pd.notna(tfin) and float(tfin) > 0:
-        return 200.0 / float(tfin)  # Finish is 200 → 0
+        return 200.0 / float(tfin)
     return np.nan
 
-# ======================= Distance + Context PI weights (reuse) =============
+# ======================= Distance + Context PI weights =====================
 def pi_weights_distance_and_context(distance_m: float,
                                     acc_median: float | None,
                                     grd_median: float | None) -> dict:
-    """
-    Distance logic (same anchors as your 100m app, applies equally here):
-      - 1000m: F200=0.12, tsSPI=0.35, Accel=0.36, Grind=0.17
-      - 1100m: F200=0.10, tsSPI=0.36, Accel=0.34, Grind=0.20
-      - 1200m: F200=0.08, tsSPI=0.37, Accel=0.30, Grind=0.25
-      - >1200m: shift 0.01 per +100m from tsSPI → Grind, cap Grind at 0.40
-    Context nudge (±0.02 total) based on (median Accel − median Grind).
-    """
     dm = float(distance_m or 1200)
     if dm <= 1000:
         base = {"F200_idx":0.12, "tsSPI":0.35, "Accel":0.36, "Grind":0.17}
@@ -233,19 +219,18 @@ def pi_weights_distance_and_context(distance_m: float,
 def build_metrics_200(df_in: pd.DataFrame, D_actual_m: float):
     w = df_in.copy()
 
-    # numeric finish pos (if present)
     if "Finish_Pos" in w.columns:
         w["Finish_Pos"] = as_num(w["Finish_Pos"])
 
-    seg_markers = collect_markers_200(w)  # e.g. [1600, 1400, ..., 200]
+    seg_markers = collect_markers_200(w)
     _dbg(DEBUG, "Markers (200m)", seg_markers)
 
-    # per-segment speeds (200 m / time) + Finish as 200 m
+    # per-segment speeds + Finish as 200 m
     for m in seg_markers:
         w[f"spd_{m}"] = 200.0 / as_num(w.get(f"{m}_Time"))
     w["spd_Finish"] = 200.0 / as_num(w.get("Finish_Time")) if "Finish_Time" in w.columns else np.nan
 
-    # race time = sum of all 200 m splits present from (D-200) down to 200 + Finish_Time
+    # race time = sum of 200 m splits from (D-200)…200 + Finish
     if len(seg_markers) > 0:
         wanted = list(range(int(D_actual_m) - 200, 199, -200))
         cols = [f"{m}_Time" for m in wanted if f"{m}_Time" in w.columns]
@@ -279,7 +264,7 @@ def build_metrics_200(df_in: pd.DataFrame, D_actual_m: float):
             return 100.0 + deltas * factor
         return idx_series
 
-    # ---------- Build 200m stage composite speeds (per saved rules) ----------
+    # ---------- 200m stage composite speeds ----------
     D = float(D_actual_m)
     cols_present = set(w.columns)
 
@@ -287,13 +272,13 @@ def build_metrics_200(df_in: pd.DataFrame, D_actual_m: float):
     f200_col = f"{int(D-200)}_Time"
     f200_cols = [f200_col] if f200_col in cols_present else []
 
-    # tsSPI: (D-400) down to 600 inclusive, step 200
+    # tsSPI: (D-400) down to 600 inclusive
     tssp_cols = stage_block_cols_200(int(D-400), 600, cols_present)
 
     # Accel: 400 + 200
     accel_cols = [c for c in [f"400_Time", f"200_Time"] if c in cols_present]
 
-    # Grind: Finish only (200 → 0)
+    # Grind: Finish only
     # handled by grind_speed_200(row)
 
     # ---------- Convert to indices vs field (100 = par) ----------
@@ -316,7 +301,7 @@ def build_metrics_200(df_in: pd.DataFrame, D_actual_m: float):
     w["Accel"]    = speed_to_index(pd.to_numeric(w["_ACC_spd"],  errors="coerce"))
     w["Grind"]    = speed_to_index(pd.to_numeric(w["_GR_spd"],   errors="coerce"))
 
-    # ---------- PI v3.1 (distance- & context-aware weights, robust 0–10 scaling) ----------
+    # ---------- PI v3.1 ----------
     acc_med = w["Accel"].median(skipna=True)
     grd_med = w["Grind"].median(skipna=True)
     PI_W = pi_weights_distance_and_context(float(D), acc_med, grd_med)
@@ -441,7 +426,7 @@ def _repel_labels_builtin(ax, x, y, labels, *,
                 if not bbs[i].overlaps(bbs[j]): 
                     continue
                 ci = ((bbs[i].x0+bbs[i].x1)/2, (bbs[i].y0+bbs[i].y1)/2)
-                cj = ((bbs[j].x0+cbs[j].x1)/2, (bbs[j].y0+cbs[j].y1)/2) if False else ((bbs[j].x0+bbs[j].x1)/2, (bbs[j].y0+bbs[j].y1)/2)
+                cj = ((bbs[j].x0+bbs[j].x1)/2, (bbs[j].y0+bbs[j].y1)/2)
                 vx, vy = ci[0]-cj[0], ci[1]-cj[1]
                 if vx == 0 and vy == 0: vx = 1.0
                 n = (vx**2 + vy**2)**0.5
@@ -482,7 +467,7 @@ def label_points_neatly(ax, x, y, names):
     except Exception:
         _repel_labels_builtin(ax, x, y, names)
 
-st.markdown("## Sectional Shape Map — Accel (400→200 & 200→Finish’s pre-leg) vs Grind (Finish)")
+st.markdown("## Sectional Shape Map — Accel (400+200) vs Grind (Finish)")
 needed_cols = {"Horse", "Accel", "Grind", "tsSPI", "PI"}
 if not needed_cols.issubset(metrics.columns):
     st.warning("Shape Map: required columns missing: " + ", ".join(sorted(needed_cols - set(metrics.columns))))
@@ -505,7 +490,10 @@ else:
         cv = dfm["tsSPIΔ"].to_numpy()
         piv = dfm["PI"].fillna(0).to_numpy()
 
-        span = np.nanmax([np.nanmax(np.abs(xv)), np.nanmax(np.abs(yv))])
+        try:
+            span = float(np.nanmax([np.nanmax(np.abs(xv)), np.nanmax(np.abs(yv))]))
+        except Exception:
+            span = 1.0
         if not np.isfinite(span) or span <= 0: span = 1.0
         lim = max(4.5, float(np.ceil(span / 1.5) * 1.5))
 
@@ -568,7 +556,6 @@ st.markdown("## Pace Curve — field average (black) + Top 8 finishers [200 m po
 if len(seg_markers) == 0 and "Finish_Time" not in work.columns:
     st.info("Not enough *_Time columns to draw the pace curve.")
 else:
-    # Ordered 200 m segments: (D-200), (D-400), …, 200, FIN
     wanted = [m for m in range(int(race_distance_input) - 200, 199, -200)]
     segs = []
     for m in wanted:
@@ -588,7 +575,6 @@ else:
 
         field_avg = speed_df.mean(axis=0).to_numpy()
 
-        # choose top 8: finish pos if present, else PI
         if "Finish_Pos" in metrics.columns and metrics["Finish_Pos"].notna().any():
             top8 = metrics.sort_values("Finish_Pos").head(8)
         else:
@@ -657,7 +643,8 @@ if not top8_pi.empty:
         for k in stacks: stacks[k].append(parts[k])
         totals.append(total_pi)
         horses.append(str(r.get("Horse", "")))
-        is_winner.append(int(r.get("Finish_Pos", 0)) == 1)
+        fp = pd.to_numeric(r.get("Finish_Pos", np.nan), errors="coerce")
+        is_winner.append(False if pd.isna(fp) else int(fp) == 1)
 
     fig3, ax3 = plt.subplots(figsize=(max(7.5, 0.95*len(horses)), 4.8))
     x = np.arange(len(horses))
@@ -686,7 +673,7 @@ if not top8_pi.empty:
 else:
     st.info("No PI values available to plot the stacked contributions.")
 
-# ======================= Hidden Horses (v2) — 200 m tweaks =================
+# ======================= Hidden Horses (v2) — 200 m grid =================
 st.markdown("## Hidden Horses (v2) — 200 m grid")
 hh = metrics.copy()
 
@@ -715,7 +702,7 @@ if need_cols.issubset(hh.columns) and len(hh) > 0:
 else:
     hh["SOS"] = 0.0
 
-# 2) ASI² (bias-aware against-shape)
+# 2) ASI²
 acc_med = pd.to_numeric(hh.get("Accel"), errors="coerce").median(skipna=True)
 grd_med = pd.to_numeric(hh.get("Grind"), errors="coerce").median(skipna=True)
 bias = (acc_med - 100.0) - (grd_med - 100.0)
@@ -726,7 +713,7 @@ if bias >= 0:
 else:
     hh["ASI2"] = (B * (S).clip(lower=0.0) / 5.0).fillna(0.0)
 
-# 3) TFS (late variability vs mid pace) — use last three 200m pre-Finish: 600, 400, 200
+# 3) TFS — last three 200 m pre-Finish: 600, 400, 200
 def tfs_row(r):
     last3_cols = [c for c in ["600_Time","400_Time","200_Time"] if c in r.index]
     spds = []
@@ -760,7 +747,7 @@ def tfs_plus(x):
 
 hh["TFS_plus"] = hh["TFS"].apply(tfs_plus)
 
-# 4) UEI (unchanged rules)
+# 4) UEI
 def uei_row(r):
     ts = pd.to_numeric(r.get("tsSPI"), errors="coerce")
     ac = pd.to_numeric(r.get("Accel"), errors="coerce")
