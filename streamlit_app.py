@@ -7,285 +7,304 @@ from matplotlib.colors import TwoSlopeNorm
 from matplotlib.lines import Line2D
 import io, math, re
 
-st.set_page_config(page_title="Race Edge — 200m splits | PI v3.1 + GCI + Hidden Horses v2",
+# ============== Page config ==============
+st.set_page_config(page_title="Race Edge — 200m splits (+stub) | PI v3.1 + GCI + Hidden Horses v2",
                    layout="wide")
 
-# ---------------- helpers ----------------
+# ============== Small helpers ==============
 def as_num(x): return pd.to_numeric(x, errors="coerce")
-
-def parse_time_to_seconds(x):
-    """Accepts numbers (seconds) or strings like '2:05.02', ':05.2', '125.5'."""
-    if pd.isna(x): return np.nan
-    if isinstance(x, (int, float)) and np.isfinite(x): return float(x)
-    s = str(x).strip()
-    if s == "": return np.nan
-    #  M:SS(.fff)  or  H:MM:SS(.fff) (rare)
-    m = re.match(r'^\s*(?:(\d+):)?(\d{1,2}):(\d{1,2})(?:[.,](\d+))?\s*$', s)
-    if m:
-        h  = int(m.group(1) or 0)
-        m_ = int(m.group(2))
-        s_ = int(m.group(3))
-        frac = float(f"0.{m.group(4)}") if m.group(4) else 0.0
-        return 3600*h + 60*m_ + s_ + frac
-    #  M:SS(.fff) (common)
-    m2 = re.match(r'^\s*(\d+):(\d{1,2})(?:[.,](\d+))?\s*$', s)
-    if m2:
-        m_ = int(m2.group(1)); s_ = int(m2.group(2))
-        frac = float(f"0.{m2.group(3)}") if m2.group(3) else 0.0
-        return 60*m_ + s_ + frac
-    # plain seconds (maybe with decimal comma/point)
-    s = s.replace(",", ".")
-    try:
-        return float(s)
-    except Exception:
-        return np.nan
-
 def color_cycle(n):
     base = plt.rcParams['axes.prop_cycle'].by_key().get('color',
             ['C0','C1','C2','C3','C4','C5','C6','C7','C8','C9'])
-    out=[]; i=0
-    while len(out)<n: out.append(base[i%len(base)]); i+=1
+    out, i = [], 0
+    while len(out) < n: out.append(base[i % len(base)]); i += 1
     return out
-
 def clamp(v, lo, hi): return max(lo, min(hi, float(v)))
-
 def mad_std(x):
     x = np.asarray(x, dtype=float); x = x[np.isfinite(x)]
-    if x.size==0: return np.nan
-    med=np.median(x); mad=np.median(np.abs(x-med)); return 1.4826*mad
-
+    if x.size == 0: return np.nan
+    med = np.median(x); mad = np.median(np.abs(x - med))
+    return 1.4826 * mad
 def winsorize(s, p_lo=0.10, p_hi=0.90):
-    lo=s.quantile(p_lo); hi=s.quantile(p_hi); return s.clip(lower=lo, upper=hi)
-
-def _lerp(a,b,t): return a+(b-a)*float(t)
+    lo = s.quantile(p_lo); hi = s.quantile(p_hi)
+    return s.clip(lower=lo, upper=hi)
+def _lerp(a,b,t): return a + (b - a) * float(t)
 def _interpolate_weights(dm, a_dm, a_w, b_dm, b_w):
-    span=float(b_dm-a_dm); t=0.0 if span<=0 else (float(dm)-a_dm)/span
+    span = float(b_dm - a_dm)
+    t = 0.0 if span <= 0 else (float(dm) - a_dm) / span
     return {"F200_idx": _lerp(a_w["F200_idx"], b_w["F200_idx"], t),
             "tsSPI":    _lerp(a_w["tsSPI"],    b_w["tsSPI"],    t),
             "Accel":    _lerp(a_w["Accel"],    b_w["Accel"],    t),
             "Grind":    _lerp(a_w["Grind"],    b_w["Grind"],    t)}
-
-def _dbg(enabled, label, obj=None):
-    if enabled:
+def _dbg(on, label, obj=None):
+    if on:
         st.write(f"🔧 {label}")
         if obj is not None: st.write(obj)
 
-# ---------------- UI ----------------
+# ============== Sidebar ==============
 with st.sidebar:
-    st.markdown("### Upload (200 m splits)")
+    st.markdown("### Upload (200 m grid + stub)")
     up = st.file_uploader(
-        "CSV/XLSX with 200 m splits: e.g. 1600_Time, 1400_Time, …, 200_Time, FinishSplit (Finish_Time), and total Stop/Finish Time.",
+        "CSV/XLSX with splits like 1600_Time, 1400_Time, …, 200_Time, optional stub (e.g. 50_Time/160_Time), and Finish.",
         type=["csv","xlsx","xls"]
     )
+    # allow ANY distance (10m steps to make it easy to type)
     race_distance_input = st.number_input("Race Distance (m)", min_value=800, max_value=4000,
-                                          step=200, value=1600)
+                                          step=10, value=1600)
     DEBUG = st.toggle("Debug info", value=False)
 if not up: st.stop()
 
-# ---------------- load ----------------
+# ============== Load file ==============
 try:
     work = pd.read_csv(up) if up.name.lower().endswith(".csv") else pd.read_excel(up)
     st.success("File loaded.")
 except Exception:
     st.error("Failed to read file."); st.stop()
 
-# ---------------- header normalizer ----------------
-def _canon(s: str) -> str:
-    return re.sub(r'[^a-z0-9]', '', s.lower())
+# ============== Time parsing ==============
+def parse_time_to_seconds(v):
+    """Accepts 12.34 / 12,34 / m:ss.xx / h:mm:ss.xx / strings; returns seconds (float) or NaN."""
+    if v is None or (isinstance(v, float) and np.isnan(v)): return np.nan
+    s = str(v).strip()
+    if s == "": return np.nan
+    s = s.replace(",", ".")
+    if ":" in s:
+        parts = s.split(":")
+        try:
+            parts = [float(p) for p in parts]
+        except Exception:
+            return np.nan
+        if len(parts) == 3:
+            h, m, sec = parts; return h*3600 + m*60 + sec
+        if len(parts) == 2:
+            m, sec = parts; return m*60 + sec
+        return np.nan
+    try: return float(s)
+    except Exception: return np.nan
 
-# Aliases for the **finish split** (200→0). Will become `Finish_Time`.
+# ============== Header normalizer ==============
+def _canon(s: str) -> str: return re.sub(r'[^a-z0-9]', '', s.lower())
+
 FINISH_SPLIT_ALIASES = {
-    "finishsplit","last200","final200","home200","200mfinish","finish200","tofinish",
-    "fin200","lastfurlong","finalfurlong"  # include furlong lingo for SA/UK data
+    "finishsplit","finish200","last200","final200","home200","tofinish","200mfinish","fin200"
 }
-# Aliases for the **total race time**. Will become `RaceTotal`.
-RACE_TOTAL_ALIASES = {
-    "stopfinishtime","finishtime","finish","racetime","officialtime","totaltime","time","stoptime"
+FINISH_TOTAL_ALIASES = {
+    "finishtime","racetime","totaltime","overalltime","finaltime","time","finish"
 }
 
-def normalize_headers_200m(df: pd.DataFrame, D_m: int) -> pd.DataFrame:
+def normalize_headers(df: pd.DataFrame, D_m: int) -> pd.DataFrame:
     rename = {}
     for col in list(df.columns):
         raw = str(col).strip()
         cx = _canon(raw)
 
-        # Finish position → Finish_Pos
-        if re.fullmatch(r'(?i)(finish\s*pos(ition)?|pos(ition)?|fin_pos|finishpos)', raw):
-            rename[col] = "Finish_Pos"; continue
-
-        # Finish split (200→0) → Finish_Time
-        if (cx in FINISH_SPLIT_ALIASES) or re.search(r'(?i)\b(last\s*200|final\s*200|finish\s*split)\b', raw):
-            rename[col] = "Finish_Time"; continue
-
-        # Total race time → RaceTotal
-        if (cx in RACE_TOTAL_ALIASES) or re.search(r'(?i)\b(finish|race|official)\s*time\b', raw):
-            rename[col] = "RaceTotal"; continue
-
         # Horse
         if re.fullmatch(r'(?i)(horse|runner|name)', raw):
             rename[col] = "Horse"; continue
 
-        # 200 m splits like "1600mTime", "1600 Time", "1600_split"
-        m = re.match(r'(?i).*?(\d{3,4})\s*m?\s*[_\s-]?\s*(time|split)?$', raw)
+        # Position
+        if re.fullmatch(r'(?i)(finish\s*pos(ition)?|pos(ition)?|fin_pos|finishpos)', raw):
+            rename[col] = "Finish_Pos"; continue
+
+        # Explicit finish split vs total
+        if (cx in FINISH_SPLIT_ALIASES) or re.fullmatch(r'(?i)(finish\s*split|finish200|last200|final200|home200)', raw):
+            rename[col] = "Finish_Time"; continue
+        if (cx in FINISH_TOTAL_ALIASES) or re.fullmatch(r'(?i)(finish\s*time|race\s*time|total\s*time)', raw):
+            rename[col] = "RaceTotal_raw"; continue
+
+        # Any numeric split like "1600mTime", "160_Time", "1450_Time", etc. (≤ D)
+        m = re.match(r'(?i).*?(\d{2,4})\s*m?\s*[_\s-]?\s*(time|split)?$', raw)
         if m:
             metres = int(m.group(1))
-            if metres % 200 == 0 and 200 <= metres <= int(D_m):
+            if 0 < metres <= int(D_m):  # accept ANY metres up to D (so stub like 50/100/160 works)
                 rename[col] = f"{metres}_Time"; continue
 
-        # Camel-case shortcut
-        m2 = re.match(r'(?i)^(\d{3,4})m(Time|Split)$', raw)
+        m2 = re.match(r'(?i)^(\d{2,4})m(Time|Split)$', raw)
         if m2:
             metres = int(m2.group(1))
-            if metres % 200 == 0:
+            if 0 < metres <= int(D_m):
                 rename[col] = f"{metres}_Time"; continue
 
     out = df.rename(columns=rename)
+    out = out.loc[:, ~out.columns.duplicated()]  # drop dupes, keep first
 
-    # Drop duplicate columns (keep first)
-    out = out.loc[:, ~out.columns.duplicated()]
-
-    # Coerce Finish_Pos numeric even if '1st'
     if "Finish_Pos" in out.columns:
         out["Finish_Pos"] = out["Finish_Pos"].astype(str).str.extract(r'(\d+)')[0].astype(float)
 
-    # Parse RaceTotal into seconds column if present
-    if "RaceTotal" in out.columns:
-        out["RaceTotal_s"] = out["RaceTotal"].apply(parse_time_to_seconds)
-
     return out
 
-work = normalize_headers_200m(work, int(race_distance_input))
+work = normalize_headers(work, int(race_distance_input))
+
+# ============== Coerce times & derive Finish if needed ==============
+def coerce_and_derives(df: pd.DataFrame, D_m: int) -> pd.DataFrame:
+    g = df.copy()
+
+    # parse all *_Time + any raw total
+    for c in list(g.columns):
+        if c.endswith("_Time") or c == "RaceTotal_raw":
+            g[c] = g[c].apply(parse_time_to_seconds)
+
+    # If Finish_Time looks like a total (> 40s), park it as RaceTotal_s
+    if "Finish_Time" in g.columns:
+        mask_totalish = g["Finish_Time"] > 40.0
+        if mask_totalish.any():
+            g.loc[mask_totalish, "RaceTotal_s"] = g.loc[mask_totalish, "Finish_Time"]
+            g.loc[mask_totalish, "Finish_Time"] = np.nan
+
+    # If we have a raw total, convert to seconds
+    if "RaceTotal_raw" in g.columns:
+        g["RaceTotal_s"] = g["RaceTotal_raw"].apply(parse_time_to_seconds)
+        g.drop(columns=["RaceTotal_raw"], inplace=True)
+
+    # If no Finish_Time, derive as: total − sum(other splits up to D (including stub))
+    need_finish = ("Finish_Time" not in g.columns) or g["Finish_Time"].isna().all()
+    if need_finish and "RaceTotal_s" in g.columns:
+        # collect all numeric split columns within (0..D], EXCEPT Finish_Time
+        split_cols = [c for c in g.columns if c.endswith("_Time") and c != "Finish_Time"
+                      and 0 < int(c.split("_")[0]) <= int(D_m)]
+        if split_cols:
+            sums = g[split_cols].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+            g["Finish_Time"] = g["RaceTotal_s"] - sums
+            # sanity bounds for last-200 (usually ~9–20s)
+            g.loc[(g["Finish_Time"] < 6.0) | (g["Finish_Time"] > 30.0), "Finish_Time"] = np.nan
+
+    return g
+
+work = coerce_and_derives(work, int(race_distance_input))
 
 st.markdown("### Raw Table")
 st.dataframe(work.head(12), use_container_width=True)
-_dbg(DEBUG, "Columns (normalized, deduped)", list(work.columns))
+_dbg(DEBUG, "Columns (normalized)", list(work.columns))
 
-# ---------------- markers (200 m) ----------------
-def collect_markers_200(df):
-    marks=[]
+# ============== 200 m grid + STUB support ==============
+D = float(race_distance_input)
+stub = int(D % 200)  # 0 if clean; else e.g. 50, 100, 160
+first_marker = int(D - (stub if stub > 0 else 200))  # e.g. 1160→1000, 1450→1400, 1600→1400
+
+def collect_markers(df):
+    """All *_Time (numeric) <= D, excluding Finish_Time; sorted desc."""
+    marks = []
     for c in df.columns:
-        if c.endswith("_Time") and c!="Finish_Time":
+        if c.endswith("_Time") and c != "Finish_Time":
             try:
-                m=int(c.split("_")[0])
-                if m%200==0: marks.append(m)
+                m = int(c.split("_")[0])
+                if 0 < m <= int(D): marks.append(m)
             except: pass
     return sorted(set(marks), reverse=True)
 
 def sum_times(row, cols):
-    vals=[as_num(row.get(c)).item() if hasattr(as_num(row.get(c)), "item") else as_num(row.get(c)) for c in cols]
-    vals=[v for v in vals if pd.notna(v)]
+    vals = [as_num(row.get(c)).item() if hasattr(as_num(row.get(c)), "item")
+            else as_num(row.get(c)) for c in cols]
+    vals = [v for v in vals if pd.notna(v)]
     return np.sum(vals) if len(vals) else np.nan
 
-def stage_block_cols_200(start_m, end_m_inclusive, df_cols):
-    if start_m<end_m_inclusive: return []
-    want=list(range(int(start_m), int(end_m_inclusive)-1, -200))
-    return [f"{m}_Time" for m in want if f"{m}_Time" in df_cols]
+def stage_block_cols(start_m, end_m_inclusive, step, df_cols_set):
+    """Return existing *_Time from start_m down to end_m_inclusive by 'step'."""
+    if start_m < end_m_inclusive: return []
+    want = list(range(int(start_m), int(end_m_inclusive) - 1, -int(step)))
+    return [f"{m}_Time" for m in want if f"{m}_Time" in df_cols_set]
 
-def stage_speed(row, cols, meters_per_split=200.0):
+def stage_speed(row, cols, meters_per_split):
     if not cols: return np.nan
-    tsum=sum_times(row, cols)
-    if pd.isna(tsum) or tsum<=0: return np.nan
-    dist=meters_per_split*len([c for c in cols if pd.notna(row.get(c))])
-    if dist<=0: return np.nan
-    return dist/tsum
+    tsum = sum_times(row, cols)
+    if pd.isna(tsum) or tsum <= 0: return np.nan
+    # distance = sum of actual segment lengths represented by those column names
+    total_m = 0.0
+    for c in cols:
+        m = int(c.split("_")[0])
+        prev = m + meters_per_split  # meters_per_split is 200 for regular blocks; stub handled separately
+        # We'll compute exact length using names: for regular blocks it's 200; for stub it's 'stub'
+        # But easier: when we assemble cols, pass meters_per_split=200 and handle stub separately where needed.
+    # For our usage below we either pass all-200 blocks, OR a single stub with its true length via meters_per_split.
+    return (meters_per_split * len(cols)) / tsum  # used only for pure-200 blocks OR single stub
 
-def grind_speed_200(row):
-    tfin=as_num(row.get("Finish_Time"))
-    return (200.0/float(tfin)) if pd.notna(tfin) and float(tfin)>0 else np.nan
-
-# ---------------- weights ----------------
-def pi_weights_distance_and_context(distance_m: float, acc_median: float|None, grd_median: float|None)->dict:
-    dm=float(distance_m or 1200)
-    if dm<=1000:
-        base={"F200_idx":0.12,"tsSPI":0.35,"Accel":0.36,"Grind":0.17}
-    elif dm<1100:
-        base=_interpolate_weights(dm,1000,{"F200_idx":0.12,"tsSPI":0.35,"Accel":0.36,"Grind":0.17},
-                                     1100,{"F200_idx":0.10,"tsSPI":0.36,"Accel":0.34,"Grind":0.20})
-    elif dm<1200:
-        base=_interpolate_weights(dm,1100,{"F200_idx":0.10,"tsSPI":0.36,"Accel":0.34,"Grind":0.20},
-                                     1200,{"F200_idx":0.08,"tsSPI":0.37,"Accel":0.30,"Grind":0.25})
-    elif dm==1200:
-        base={"F200_idx":0.08,"tsSPI":0.37,"Accel":0.30,"Grind":0.25}
-    else:
-        shift_units=max(0.0,(dm-1200.0)/100.0)*0.01
-        grind=min(0.25+shift_units,0.40); F200,ACC=0.08,0.30
-        ts=max(0.0,1.0-F200-ACC-grind)
-        base={"F200_idx":F200,"tsSPI":ts,"Accel":ACC,"Grind":grind}
-
-    acc_med=float(acc_median) if acc_median is not None else None
-    grd_med=float(grd_median) if grd_median is not None else None
-    if acc_med is not None and grd_med is not None and math.isfinite(acc_med) and math.isfinite(grd_med):
-        bias=acc_med-grd_med; scale=math.tanh(abs(bias)/6.0); max_shift=0.02*scale
-        F200=base["F200_idx"]; ts=base["tsSPI"]; ACC=base["Accel"]; GR=base["Grind"]
-        if bias>0:
-            delta=min(max_shift, ACC-0.26); ACC-=delta; GR+=delta
-        elif bias<0:
-            delta=min(max_shift, GR-0.18); GR-=delta; ACC+=delta
-        GR=min(GR,0.40); ts=max(0.0,1.0-F200-ACC-GR)
-        base={"F200_idx":F200,"tsSPI":ts,"Accel":ACC,"Grind":GR}
-    s=sum(base.values())
-    if abs(s-1.0)>1e-6: base={k:v/s for k,v in base.items()}
-    return base
-
-# ---------------- core metrics (200 m) ----------------
-def build_metrics_200(df_in: pd.DataFrame, D_actual_m: float):
-    w=df_in.copy()
-    if "Finish_Pos" in w.columns: w["Finish_Pos"]=as_num(w["Finish_Pos"])
-    seg_markers=collect_markers_200(w); _dbg(DEBUG,"Markers (200m)",seg_markers)
-
-    # per-segment speeds
-    for m in seg_markers: w[f"spd_{m}"]=200.0/as_num(w.get(f"{m}_Time"))
-    w["spd_Finish"]=200.0/as_num(w.get("Finish_Time")) if "Finish_Time" in w.columns else np.nan
-
-    # Race time (seconds):
-    if "RaceTotal_s" in w.columns and w["RaceTotal_s"].notna().any():
-        w["RaceTime_s"] = w["RaceTotal_s"].apply(parse_time_to_seconds) if "RaceTotal_s" not in w.columns else w["RaceTotal_s"]
-    else:
-        # Sum splits (…+ Finish_Time) if no explicit total
-        if len(seg_markers)>0:
-            wanted=list(range(int(D_actual_m)-200, 199, -200))
-            cols=[f"{m}_Time" for m in wanted if f"{m}_Time" in w.columns]
-            if "Finish_Time" in w.columns: cols+=["Finish_Time"]
-            w["RaceTime_s"]=w[cols].apply(pd.to_numeric, errors="coerce").sum(axis=1)
-        else:
-            w["RaceTime_s"]=as_num(w.get("Race Time", np.nan))
-
-    # --- stabilizers ---
+def speed_to_index(spd_series):
+    med = spd_series.median(skipna=True)
+    idx_raw = 100.0 * (spd_series / med)
+    # stabilizers
     def shrink_center(idx_series):
-        x=idx_series.dropna().values; N=len(x)
-        if N==0: return 100.0,0
-        med=float(np.median(x)); alpha=N/(N+6.0); return alpha*med+(1-alpha)*100.0, N
+        x = idx_series.dropna().values; N = len(x)
+        if N == 0: return 100.0, 0
+        med_race = float(np.median(x)); alpha = N / (N + 6.0)
+        return alpha*med_race + (1-alpha)*100.0, N
     def dispersion_equalizer(delta_series, N_eff, N_ref=10, beta=0.20, cap=1.20):
-        gamma=1.0 + beta*max(0, N_ref-N_eff)/N_ref; return delta_series*min(gamma, cap)
+        gamma = 1.0 + beta * max(0, N_ref - N_eff) / N_ref
+        return delta_series * min(gamma, cap)
     def variance_floor(idx_series, floor=1.5, cap=1.25):
-        deltas=idx_series-100.0; sigma=mad_std(deltas)
-        if not np.isfinite(sigma) or sigma<=0: return idx_series
-        if sigma<floor: factor=min(cap, floor/sigma); return 100.0 + deltas*factor
+        deltas = idx_series - 100.0; sigma = mad_std(deltas)
+        if not np.isfinite(sigma) or sigma <= 0: return idx_series
+        if sigma < floor:
+            factor = min(cap, floor / sigma); return 100.0 + deltas * factor
         return idx_series
+    center, n_eff = shrink_center(idx_raw)
+    idx = 100.0 * (spd_series / (center/100.0 * med))
+    idx = 100.0 + dispersion_equalizer(idx - 100.0, n_eff)
+    idx = variance_floor(idx)
+    return idx
 
-    D=float(D_actual_m); cols_present=set(w.columns)
-    f200_col=f"{int(D-200)}_Time"; f200_cols=[f200_col] if f200_col in cols_present else []
-    tssp_cols=stage_block_cols_200(int(D-400), 600, cols_present)
-    accel_cols=[c for c in ["400_Time","200_Time"] if c in cols_present]
+# ============== Build metrics (F200 uses FIRST SPLIT; may be stub) ==============
+def build_metrics(df_in: pd.DataFrame):
+    w = df_in.copy()
+    if "Finish_Pos" in w.columns: w["Finish_Pos"] = as_num(w["Finish_Pos"])
 
-    w["_F200_spd"]=w.apply(lambda r: (200.0/as_num(r.get(f200_col)))
-                           if f200_cols and pd.notna(as_num(r.get(f200_col))) and float(as_num(r.get(f200_col)))>0 else np.nan, axis=1)
-    w["_MID_spd"]=w.apply(lambda r: stage_speed(r, tssp_cols, meters_per_split=200.0), axis=1)
-    w["_ACC_spd"]=w.apply(lambda r: stage_speed(r, accel_cols, meters_per_split=200.0), axis=1)
-    w["_GR_spd"]=w.apply(grind_speed_200, axis=1)
+    seg_markers = collect_markers(w)  # includes stub marker if present
+    _dbg(DEBUG, "Markers (≤D)", seg_markers)
+    cols_set = set(w.columns)
 
-    def speed_to_index(spd_series):
-        med=spd_series.median(skipna=True)
-        idx_raw=100.0*(spd_series/med)
-        center,n_eff=shrink_center(idx_raw)
-        idx=100.0*(spd_series/(center/100.0*med))
-        idx=100.0+dispersion_equalizer(idx-100.0, n_eff)
-        idx=variance_floor(idx); return idx
+    # per-segment speeds for 200 m blocks
+    for m in seg_markers:
+        w[f"spd_{m}"] = (200.0 / as_num(w.get(f"{m}_Time"))) if (m % 200 == 0) else np.nan
+    w["spd_Finish"] = 200.0 / as_num(w.get("Finish_Time")) if "Finish_Time" in w.columns else np.nan
 
-    w["F200_idx"]=speed_to_index(pd.to_numeric(w["_F200_spd"], errors="coerce"))
-    w["tsSPI"]   =speed_to_index(pd.to_numeric(w["_MID_spd"],  errors="coerce"))
-    w["Accel"]   =speed_to_index(pd.to_numeric(w["_ACC_spd"],  errors="coerce"))
-    w["Grind"]   =speed_to_index(pd.to_numeric(w["_GR_spd"],   errors="coerce"))
+    # --- Race time ---
+    if "RaceTotal_s" in w.columns and w["RaceTotal_s"].notna().any():
+        w["RaceTime_s"] = pd.to_numeric(w["RaceTotal_s"], errors="coerce")
+    else:
+        # sum all split times up to D plus Finish
+        split_cols = [f"{m}_Time" for m in seg_markers if f"{m}_Time" in cols_set]
+        if "Finish_Time" in cols_set: split_cols += ["Finish_Time"]
+        w["RaceTime_s"] = w[split_cols].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+
+    # --- Stage definitions (with stub handling) ---
+    # F200 = FIRST split (stub if D%200>0; otherwise the D→D−200 block)
+    f200_cols = []
+    f200_len_m = 200.0
+    if f"{first_marker}_Time" in cols_set:
+        f200_cols = [f"{first_marker}_Time"]
+        f200_len_m = float(200 if (stub == 0) else stub)  # if stub, it's stub metres
+
+    # tsSPI = (D-400) down to 600, step 200, regular 200 m blocks only
+    tssp_cols = stage_block_cols(int(D-400), 600, 200, cols_set)
+
+    # Accel = 400 + 200 (regular blocks)
+    accel_cols = [c for c in ["400_Time", "200_Time"] if c in cols_set]
+
+    # Grind = Finish only (200→0)
+    # (handled via grind_speed)
+
+    # --- Compute composite speeds ---
+    def stage_spd_f200(row):
+        if not f200_cols: return np.nan
+        t = as_num(row.get(f200_cols[0]))
+        return (f200_len_m / float(t)) if pd.notna(t) and float(t) > 0 else np.nan
+
+    def stage_speed_generic(row, cols, meters_per_split):
+        return stage_speed(row, cols, meters_per_split=meters_per_split)
+
+    def grind_speed(row):
+        tfin = as_num(row.get("Finish_Time"))
+        return (200.0 / float(tfin)) if pd.notna(tfin) and float(tfin) > 0 else np.nan
+
+    w["_F200_spd"] = w.apply(stage_spd_f200, axis=1)
+    w["_MID_spd"]  = w.apply(lambda r: stage_speed_generic(r, tssp_cols, 200.0), axis=1)
+    w["_ACC_spd"]  = w.apply(lambda r: stage_speed_generic(r, accel_cols, 200.0), axis=1)
+    w["_GR_spd"]   = w.apply(grind_speed, axis=1)
+
+    # --- Indices vs field (100 = par) ---
+    w["F200_idx"] = speed_to_index(pd.to_numeric(w["_F200_spd"], errors="coerce"))
+    w["tsSPI"]    = speed_to_index(pd.to_numeric(w["_MID_spd"],  errors="coerce"))
+    w["Accel"]    = speed_to_index(pd.to_numeric(w["_ACC_spd"],  errors="coerce"))
+    w["Grind"]    = speed_to_index(pd.to_numeric(w["_GR_spd"],   errors="coerce"))
 
     # --- PI v3.1 ---
     acc_med=w["Accel"].median(skipna=True); grd_med=w["Grind"].median(skipna=True)
