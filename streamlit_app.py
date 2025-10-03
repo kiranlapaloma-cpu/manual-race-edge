@@ -8,8 +8,10 @@ from matplotlib.lines import Line2D
 import io, math, re
 
 # ======================= Page config =======================
-st.set_page_config(page_title="Race Edge — 200m splits (+stub) | PI v3.1 + GCI + Hidden Horses v2",
-                   layout="wide")
+st.set_page_config(
+    page_title="Race Edge — 200m splits (+stub) | PI v3.1 + GCI + Hidden Horses v2 + Report",
+    layout="wide"
+)
 
 # ======================= Small helpers =====================
 def as_num(x): return pd.to_numeric(x, errors="coerce")
@@ -47,9 +49,9 @@ def _dbg(enabled, label, obj=None):
 
 # ======================= Sidebar ===========================
 with st.sidebar:
-    st.markdown("### Upload (200 m grid + optional stub)")
+    st.markdown("### Upload (200 m grid + optional total)")
     up = st.file_uploader(
-        "CSV/XLSX with splits like 1800_Time, 1600_Time, …, 200_Time, and Finish_Time (or total).",
+        "CSV/XLSX with splits like 1800_Time, 1600_Time, …, 200_Time, and Finish_Time (or a race total).",
         type=["csv","xlsx","xls"]
     )
     race_distance_input = st.number_input(
@@ -57,6 +59,7 @@ with st.sidebar:
         min_value=800, max_value=4000, step=50, value=1600,
         help="Any distance (e.g., 1160, 1250, 1450, 1750, 1900). If not a multiple of 200, the first split is a stub."
     )
+    SHOW_WARNINGS = st.toggle("Show data warnings", value=True)
     DEBUG = st.toggle("Debug info", value=False)
 
 if not up: st.stop()
@@ -174,10 +177,8 @@ def coerce_and_derives(df: pd.DataFrame, D_m: int) -> pd.DataFrame:
     # If Finish_Time missing, derive from total minus sum(other splits)
     need_finish = ("Finish_Time" not in g.columns) or g["Finish_Time"].isna().all()
     if need_finish and "RaceTotal_s" in g.columns:
-        # Build the expected split list (with stub if needed), excluding Finish_Time
         D = int(D_m)
         rem = D % 200
-        # first segment ends at D-rem (if rem>0) else D-200
         first_end = D - rem if rem > 0 else D - 200
         split_ends = []
         if first_end >= 200:
@@ -291,7 +292,7 @@ def pi_weights_distance_and_context(distance_m: float,
     if abs(s-1.0)>1e-6: base={k:v/s for k,v in base.items()}
     return base
 
-# ======================= Core metric build (stub-aware) ===================
+# ======================= Core metric build (stub-aware, UNCHANGED MATH) ===
 def build_metrics_stub(df_in: pd.DataFrame, D_actual_m: float):
     w = df_in.copy()
     D = int(D_actual_m)
@@ -340,8 +341,7 @@ def build_metrics_stub(df_in: pd.DataFrame, D_actual_m: float):
     accel_cols = [c for c in ["400_Time","200_Time"] if c in cols_present]
     accel_lens = [200.0 for _ in accel_cols]
 
-    # Grind = Finish only (200 m)
-    # handled by grind_speed
+    # Grind = Finish only (200 m) — handled by grind_speed
 
     # ---------- Convert to indices vs field (100 = par) ----------
     def speed_to_index(spd_series):
@@ -444,13 +444,49 @@ try:
 except Exception as e:
     st.error("Metric computation failed."); st.exception(e); st.stop()
 
+# ======================= Data Integrity (expected vs present) ==============
+D = int(race_distance_input)
+
+def expected_cols_for_200m(D_m: int, seg_plan_local):
+    """Build expected *_Time columns (excluding Finish) from seg plan + Finish_Time."""
+    cols = [f"{end}_Time" for (end, _) in seg_plan_local]
+    cols.append("Finish_Time")
+    return cols
+
+exp_cols = expected_cols_for_200m(D, seg_plan)
+missing_cols = [c for c in exp_cols if c not in work.columns]
+invalid_counts = {}
+for c in exp_cols:
+    if c in work.columns:
+        s = pd.to_numeric(work[c], errors="coerce")
+        invalid_counts[c] = int(((s <= 0) | s.isna()).sum())
+
+def integrity_line():
+    msgs = []
+    if missing_cols:
+        msgs.append("Missing: " + ", ".join(missing_cols))
+    bads = [f"{k} ({v} rows)" for k,v in invalid_counts.items() if v > 0]
+    if bads:
+        msgs.append("Invalid/zero times → treated as missing: " + ", ".join(bads))
+    return " • ".join(msgs)
+
+# ======================= Minimal Header (distance only) ====================
+st.markdown(f"## Race Distance: **{D}m**")
+if SHOW_WARNINGS and (missing_cols or any(v>0 for v in invalid_counts.values())):
+    st.markdown(f"*(⚠ {integrity_line()})*")
+
 # ======================= Metrics table =====================
 st.markdown("## Sectional Metrics — stub-aware (PI v3.1 & GCI)")
 show_cols = ["Horse","Finish_Pos","RaceTime_s","F200_idx","tsSPI","Accel","Grind","PI","GCI"]
 for c in show_cols:
     if c not in metrics.columns: metrics[c]=np.nan
-st.dataframe(metrics[show_cols].sort_values(["PI","Finish_Pos"], ascending=[False, True]),
-             use_container_width=True)
+
+# stable sort: NaN Finish_Pos last
+display_df = metrics[show_cols].copy()
+_finish_sort = display_df["Finish_Pos"].fillna(1e9)
+display_df = display_df.assign(_FinishSort=_finish_sort)
+display_df = display_df.sort_values(["PI","_FinishSort"], ascending=[False, True]).drop(columns=["_FinishSort"])
+st.dataframe(display_df, use_container_width=True)
 
 # ===================== Sectional Shape Map — Accel vs Grind =====================
 def _repel_labels_builtin(ax, x, y, labels, *,
@@ -508,6 +544,7 @@ def label_points_neatly(ax, x, y, names):
         _repel_labels_builtin(ax, x, y, names)
 
 st.markdown("## Sectional Shape Map — Accel (400+200) vs Grind (Finish)")
+shape_map_png = None
 need_cols={"Horse","Accel","Grind","tsSPI","PI"}
 if not need_cols.issubset(metrics.columns):
     st.warning("Shape Map: required columns missing: " + ", ".join(sorted(need_cols - set(metrics.columns))))
@@ -564,20 +601,21 @@ else:
         ax.grid(True, linestyle=":", alpha=0.25)
         st.pyplot(fig)
 
-        buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=200, bbox_inches="tight")
-        st.download_button("Download shape map (PNG)", buf.getvalue(),
-                           file_name="shape_map.png", mime="image/png")
+        buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=300, bbox_inches="tight")
+        shape_map_png = buf.getvalue()
+        st.download_button("Download shape map (PNG)", shape_map_png, file_name="shape_map.png", mime="image/png")
         st.caption("Size = PI. X: Accel (400+200). Y: Finish (200→0). Colour = tsSPIΔ.")
 
 # ======================= Pace Curve (stub-aware) ==========================
 st.markdown("## Pace Curve — field average (black) + Top 8 finishers [stub-aware]")
+pace_png = None
 
-D = int(race_distance_input)
 segs = []  # list of (label, length_m, colname)
-for end_m, L in seg_plan:
+for i, (end_m, L) in enumerate(seg_plan):
     col = f"{end_m}_Time"
     if col in work.columns:
-        segs.append((f"{D if len(segs)==0 else end_m+L:.0f}→{end_m}", float(L), col))
+        left = D if i == 0 else int(end_m + L)
+        segs.append((f"{left}→{end_m}", float(L), col))
 # Finish
 if "Finish_Time" in work.columns:
     segs.append(("200→0 (Finish)", 200.0, "Finish_Time"))
@@ -587,15 +625,17 @@ if len(segs) == 0:
 else:
     times_df = work[[c for (_,_,c) in segs]].apply(pd.to_numeric, errors="coerce")
     speed_df = pd.DataFrame(index=work.index)
-    for (_, L, c) in [(lab, L, c) for (lab, L, c) in segs]:
+    for (_, L, c) in segs:
         speed_df[c] = L / times_df[c]
     field_avg = speed_df.mean(axis=0).to_numpy()
 
     # choose top 8: finish pos if present, else PI
     if "Finish_Pos" in metrics.columns and metrics["Finish_Pos"].notna().any():
         top8 = metrics.sort_values("Finish_Pos").head(8)
+        top8_rule = "Top-8 by Finish_Pos"
     else:
         top8 = metrics.sort_values("PI", ascending=False).head(8)
+        top8_rule = "Top-8 by PI"
 
     x_idx = list(range(len(segs)))
     x_labels = [lab for (lab,_,_) in segs]
@@ -626,11 +666,17 @@ else:
     ax2.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=3, frameon=False, fontsize=9)
     st.pyplot(fig2)
 
+    buf2 = io.BytesIO(); fig2.savefig(buf2, format="png", dpi=300, bbox_inches="tight")
+    pace_png = buf2.getvalue()
+    st.download_button("Download pace curve (PNG)", pace_png, file_name="pace_curve.png", mime="image/png")
+    st.caption(f"Top-8 plotted: {top8_rule}. Finish segment included explicitly.")
+
 # ======================= Top-8 PI — stacked contributions =========
 st.markdown("## Top-8 PI — stacked contributions")
 acc_med_for_bars = metrics["Accel"].median(skipna=True)
 grd_med_for_bars = metrics["Grind"].median(skipna=True)
 PI_W_BARS = pi_weights_distance_and_context(float(D), acc_med_for_bars, grd_med_for_bars)
+bars_png = None
 
 def parts_scaled_to_total(row, total_pi, weights, zero_floor=True):
     raw = {
@@ -683,7 +729,11 @@ if not top8_pi.empty:
     ax3.grid(axis="y", linestyle="--", alpha=0.3)
     ax3.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=4, frameon=False)
     st.pyplot(fig3)
-    st.caption("Slices rescaled to sum to each horse’s PI. ★ = race winner.")
+
+    buf3 = io.BytesIO(); fig3.savefig(buf3, format="png", dpi=300, bbox_inches="tight")
+    bars_png = buf3.getvalue()
+    st.download_button("Download PI stacks (PNG)", bars_png, file_name="pi_stacks.png", mime="image/png")
+    st.caption("Slices are rescaled to sum to each horse’s PI. ★ = race winner.")
 else:
     st.info("No PI values available to plot the stacked contributions.")
 
@@ -777,8 +827,8 @@ hh["HiddenScore"] = (1.2 + (hidden - h_med) / (2.5*h_sigma)).clip(lower=0.0, upp
 # 7) Tiering & Notes
 def hh_tier(s):
     if pd.isna(s): return ""
-    if s >= 1.8:   return "🔥 Top Hidden"
-    if s >= 1.2:   return "🟡 Notable Hidden"
+    if s >= 1.8:   return "Top Hidden"   # text for PDF safety (emoji can break in ReportLab)
+    if s >= 1.2:   return "Notable Hidden"
     return ""
 hh["Tier"] = hh["HiddenScore"].apply(hh_tier)
 
@@ -797,8 +847,8 @@ hh["Note"] = hh.apply(hh_note, axis=1)
 cols_hh = ["Horse","Finish_Pos","PI","GCI","tsSPI","Accel","Grind","SOS","ASI2","TFS","UEI","HiddenScore","Tier","Note"]
 for c in cols_hh:
     if c not in hh.columns: hh[c]=np.nan
-st.dataframe(hh.sort_values(["Tier","HiddenScore","PI"], ascending=[True,False,False])[cols_hh],
-             use_container_width=True)
+hh_view = hh.sort_values(["Tier","HiddenScore","PI"], ascending=[True,False,False])[cols_hh]
+st.dataframe(hh_view, use_container_width=True)
 
 st.caption(
     "Conventions — grid uses 200 m blocks with an optional initial stub if distance % 200 ≠ 0. "
@@ -806,3 +856,136 @@ st.caption(
     "`Finish_Time` is 200→0. If only a race total is uploaded, the app derives the last-200 as "
     "`Finish_Time = total − sum(other splits)`."
 )
+
+# ======================= PDF Report Builder ===============================
+st.markdown("---")
+st.markdown("### 📥 Download Comprehensive Report (PDF)")
+
+def make_pdf_report(distance_m: int, metrics_df: pd.DataFrame,
+                    shape_png: bytes|None, pace_png: bytes|None, bars_png_: bytes|None,
+                    hh_flagged_df: pd.DataFrame, integrity_text: str|None):
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
+        from reportlab.lib.units import cm
+    except Exception as e:
+        st.error("`reportlab` is required to create the PDF. Install with: `pip install reportlab>=4.2.0`")
+        return None
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4),
+                            leftMargin=18, rightMargin=18, topMargin=18, bottomMargin=18)
+    story = []
+    styles = getSampleStyleSheet()
+    H = styles["Heading1"]; H.fontSize = 18; H.leading = 22; H.spaceAfter = 6
+    H3 = styles["Heading3"]
+    P = styles["BodyText"]; P.fontSize = 9; P.leading = 12
+
+    # Header: Distance (bold & large)
+    story.append(Paragraph(f"Race Distance: <b>{int(distance_m)}m</b>", H))
+    if integrity_text:
+        story.append(Paragraph(f"<font color='#b36b00'>⚠ {integrity_text}</font>", P))
+    story.append(Spacer(0, 6))
+
+    # 1) Sectional Metrics table
+    story.append(Paragraph("Sectional Metrics (PI v3.1 & GCI)", H3))
+    table_df = metrics_df.copy()
+    for col in ["RaceTime_s","F200_idx","tsSPI","Accel","Grind","PI","GCI"]:
+        if col in table_df.columns:
+            table_df[col] = pd.to_numeric(table_df[col], errors="coerce").map(lambda x: "" if pd.isna(x) else f"{x:.3f}")
+    data = [list(table_df.columns)] + table_df.fillna("").astype(str).values.tolist()
+    t = Table(data, repeatRows=1)
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,0), 9),
+        ('FONTSIZE', (0,1), (-1,-1), 8),
+        ('ALIGN', (2,1), (-1,-1), 'RIGHT'),
+        ('GRID', (0,0), (-1,-1), 0.25, colors.whitesmoke),
+        ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.whitesmoke, colors.white])
+    ]))
+    story.append(t)
+    story.append(Spacer(0, 10))
+
+    # 2) Shape Map image
+    if shape_png is not None:
+        story.append(Paragraph("Sectional Shape Map — Accel vs Grind (colour = tsSPIΔ)", H3))
+        story.append(Image(io.BytesIO(shape_png), width=24*cm, height=18*cm, kind="proportional"))
+        story.append(Spacer(0, 8))
+
+    # 3) Pace Curve image
+    if pace_png is not None:
+        story.append(Paragraph("Pace Curve — field average + Top-8", H3))
+        story.append(Image(io.BytesIO(pace_png), width=24*cm, height=15*cm, kind="proportional"))
+        story.append(Spacer(0, 8))
+
+    # 4) Top-8 PI stacks
+    if bars_png_ is not None:
+        story.append(Paragraph("Top-8 PI — stacked contributions", H3))
+        story.append(Image(io.BytesIO(bars_png_), width=24*cm, height=12*cm, kind="proportional"))
+        story.append(Spacer(0, 8))
+
+    # 5) Hidden Horses v2 table (only flagged)
+    flagged = hh_flagged_df.copy()
+    if not flagged.empty:
+        story.append(Paragraph("Hidden Horses v2 (flagged)", H3))
+        fh = flagged.copy()
+        for col in ["PI","GCI","tsSPI","Accel","Grind","SOS","ASI2","TFS","UEI","HiddenScore"]:
+            if col in fh.columns:
+                fh[col] = pd.to_numeric(fh[col], errors="coerce").map(lambda x: "" if pd.isna(x) else f"{x:.3f}")
+        data_hh = [list(fh.columns)] + fh.fillna("").astype(str).values.tolist()
+        t2 = Table(data_hh, repeatRows=1)
+        t2.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,0), 9),
+            ('FONTSIZE', (0,1), (-1,-1), 8),
+            ('ALIGN', (2,1), (-1,-1), 'RIGHT'),
+            ('GRID', (0,0), (-1,-1), 0.25, colors.whitesmoke),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.whitesmoke, colors.white])
+        ]))
+        story.append(t2)
+        story.append(Spacer(0, 10))
+
+    # 6) Footnotes / conventions
+    story.append(Paragraph("<b>Conventions</b>", H3))
+    story.append(Paragraph(
+        "Grid uses 200 m blocks with an optional initial stub if distance % 200 ≠ 0. "
+        "X_Time = time from (X+Δ)→X, where Δ = stub length for the first split, else 200. "
+        "Finish_Time is 200→0. If only a race total is uploaded, the app derives the last-200 as "
+        "Finish_Time = total − sum(other splits). Indices are vs-field (100=par) with small-field stabilizers. "
+        "PI v3.1 uses distance+context weights; GCI aligns to the same worldview.",
+        P
+    ))
+
+    doc.build(story)
+    buf.seek(0)
+    return buf
+
+# Build flagged HH view (text tier already safe for PDF fonts)
+hh_flagged = hh_view[hh_view["Tier"] != ""].copy()
+
+# Compose PDF metrics table exactly like UI table
+pdf_table_df = display_df.copy()
+
+# Integrity line (only if warnings enabled & something wrong)
+integrity_text = integrity_line() if (SHOW_WARNINGS and (missing_cols or any(v>0 for v in invalid_counts.values()))) else None
+
+pdf_buf = make_pdf_report(
+    distance_m=D,
+    metrics_df=pdf_table_df,
+    shape_png=shape_map_png,
+    pace_png=pace_png,
+    bars_png_=bars_png,
+    hh_flagged_df=hh_flagged,
+    integrity_text=integrity_text
+)
+if pdf_buf is not None:
+    st.download_button(
+        "📥 Download PDF report",
+        data=pdf_buf.getvalue(),
+        file_name=f"RaceEdge_Report_{D}m.pdf",
+        mime="application/pdf"
+    )
