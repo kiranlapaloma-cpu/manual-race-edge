@@ -621,122 +621,91 @@ def build_metrics_cached(_raw_hash: str, df: pd.DataFrame, D: int, grid: str, se
 
 metrics = build_metrics_cached(RAW_HASH, work, D, grid, seg_plan, finish_len_expected)
 
-# ======================= Hidden Horses v2 — DROP-IN =======================
-import numpy as np
-import pandas as pd
-import streamlit as st
-
-# ---- Inputs expected in session_state ----
-metrics = st.session_state["metrics"].copy()
-work_df = st.session_state["work_df"].copy()
-grid    = st.session_state["grid"]              # "100m" | "200m"
-D       = int(st.session_state["race_distance_m"])
-
-# ---- small helpers ----
-def mad_std(x):
-    x = np.asarray(pd.to_numeric(x, errors="coerce"), dtype=float)
-    x = x[np.isfinite(x)]
-    if x.size == 0: return np.nan
-    med = np.median(x); mad = np.median(np.abs(x - med))
-    return 1.4826 * mad
-
-def winsorize(s, p_lo=0.10, p_hi=0.90):
-    s = pd.to_numeric(s, errors="coerce")
-    lo, hi = s.quantile(p_lo), s.quantile(p_hi)
-    return s.clip(lower=lo, upper=hi)
-
-# ---- 1) SOS (strength-of-sectionals) ----
+# -------------------- Hidden Horses v2 (grid-aware TFS) --------------------
 hh = metrics.copy()
+
+# 1) SOS
 if {"tsSPI","Accel","Grind"}.issubset(hh.columns) and len(hh) > 0:
-    ts_w = winsorize(hh["tsSPI"]); ac_w = winsorize(hh["Accel"]); gr_w = winsorize(hh["Grind"])
+    ts_w = winsorize(hh["tsSPI"])
+    ac_w = winsorize(hh["Accel"])
+    gr_w = winsorize(hh["Grind"])
+
     def rz(s: pd.Series) -> pd.Series:
-        mu = np.nanmedian(s); sd = mad_std(s)
-        if not np.isfinite(sd) or sd == 0: return pd.Series(np.zeros(len(s)), index=s.index)
+        mu = np.nanmedian(s)
+        sd = mad_std(s)
+        if not np.isfinite(sd) or sd == 0:
+            return pd.Series(np.zeros(len(s)), index=s.index)
         return (s - mu) / sd
+
     z_ts = rz(ts_w).clip(-2.5, 3.5)
     z_ac = rz(ac_w).clip(-2.5, 3.5)
     z_gr = rz(gr_w).clip(-2.5, 3.5)
-    hh["SOS_raw"] = 0.45*z_ts + 0.35*z_ac + 0.20*z_gr
+    hh["SOS_raw"] = 0.45 * z_ts + 0.35 * z_ac + 0.20 * z_gr
+
     q5, q95 = hh["SOS_raw"].quantile(0.05), hh["SOS_raw"].quantile(0.95)
     denom = (q95 - q5) if (pd.notna(q95) and pd.notna(q5) and (q95 > q5)) else 1.0
-    hh["SOS"] = (2.0*(hh["SOS_raw"] - q5)/denom).clip(0.0, 2.0)
+    hh["SOS"] = (2.0 * (hh["SOS_raw"] - q5) / denom).clip(lower=0.0, upper=2.0)
 else:
     hh["SOS"] = 0.0
 
-# ---- 2) ASI² (anti-shape index squared-lite) ----
+# 2) ASI²
 acc_med = pd.to_numeric(hh.get("Accel"), errors="coerce").median(skipna=True)
 grd_med = pd.to_numeric(hh.get("Grind"), errors="coerce").median(skipna=True)
-bias = (acc_med - 100.0) - (grd_med - 100.0)           # >0 means race rewarded Accel more than Grind
-B = min(1.0, abs(bias)/4.0)                             # bias strength 0..1
+bias = (acc_med - 100.0) - (grd_med - 100.0)
+B = min(1.0, abs(bias) / 4.0)
 S = pd.to_numeric(hh.get("Accel"), errors="coerce") - pd.to_numeric(hh.get("Grind"), errors="coerce")
 hh["ASI2"] = (B * (np.where(bias >= 0, -S, S)).clip(min=0) / 5.0)
 hh["ASI2"] = pd.to_numeric(hh["ASI2"], errors="coerce").fillna(0.0)
 
-# ---- 3) TFS (late variability vs mid) — grid-aware, using work_df raw splits ----
-# We'll build a map from Horse -> that row's raw late split times
-work_by_horse = work_df.set_index("Horse", drop=False) if "Horse" in work_df.columns else None
-
-def _late_cols_for_grid(grid: str):
+# 3) TFS (late variability vs mid pace)
+def tfs_row(r):
     if grid == "100m":
-        # three pre-finish 100m blocks
-        return ["300_Time","200_Time","100_Time"], 100.0
-    # 200m grid
-    return ["600_Time","400_Time","200_Time"], 200.0
-
-late_cols, unit_len = _late_cols_for_grid(grid)
-
-def tfs_for_horse(row_metrics):
-    # Try to pull raw times from work_df by Horse name (best) else from metrics row if present
+        last_cols = [c for c in ["300_Time","200_Time","100_Time"] if c in work.columns]
+        unit = 100.0
+    else:
+        last_cols = [c for c in ["600_Time","400_Time","200_Time"] if c in work.columns]
+        unit = 200.0
     spds = []
-    def from_series(sr, col):
-        t = pd.to_numeric(sr.get(col), errors="coerce")
-        return (unit_len / t) if (pd.notna(t) and t > 0) else np.nan
-
-    src = None
-    if work_by_horse is not None:
-        hname = str(row_metrics.get("Horse",""))
-        if hname in work_by_horse.index:
-            src = work_by_horse.loc[hname]
-    if src is None:
-        src = row_metrics
-
-    for c in late_cols:
-        spds.append(from_series(src, c))
+    for c in last_cols:
+        t = pd.to_numeric(r.get(c), errors="coerce")
+        spds.append(unit / t if pd.notna(t) and t > 0 else np.nan)
     spds = [s for s in spds if pd.notna(s)]
     if len(spds) < 2:
         return np.nan
-
     sigma = float(np.std(spds, ddof=0))
-    mid = float(pd.to_numeric(row_metrics.get("_MID_spd"), errors="coerce"))
+    mid = float(r.get("_MID_spd", np.nan))
     if not np.isfinite(mid) or mid <= 0:
         return np.nan
     return 100.0 * (sigma / mid)
 
-hh["TFS"] = metrics.apply(tfs_for_horse, axis=1)
+hh["TFS"] = metrics.apply(tfs_row, axis=1)
 
-# Distance-aware TFS gate (keeps only meaningful variability)
+# Distance-aware TFS gate
 D_rounded = int(np.ceil(float(D) / 200.0) * 200)
 gate = 4.0 if D_rounded <= 1200 else (3.5 if D_rounded < 1800 else 3.0)
 def tfs_plus(x):
-    if pd.isna(x) or x < gate: return 0.0
+    if pd.isna(x) or x < gate:
+        return 0.0
     return min(0.6, (x - gate) / 3.0)
 hh["TFS_plus"] = hh["TFS"].apply(tfs_plus)
 
-# ---- 4) UEI (upside eligibility if shape flips) ----
+# 4) UEI
 def uei_row(r):
     ts = pd.to_numeric(r.get("tsSPI"), errors="coerce")
     ac = pd.to_numeric(r.get("Accel"), errors="coerce")
     gr = pd.to_numeric(r.get("Grind"), errors="coerce")
-    if pd.isna(ts) or pd.isna(ac) or pd.isna(gr): return 0.0
+    if pd.isna(ts) or pd.isna(ac) or pd.isna(gr):
+        return 0.0
     val = 0.0
     if ts >= 102 and ac <= 98 and gr <= 98:
-        gap = min((ts - 102) / 3.0, 1.0); val = max(val, 0.3 + 0.3*gap)
+        gap = min((ts - 102) / 3.0, 1.0); val = max(val, 0.3 + 0.3 * gap)
     if ts >= 102 and gr >= 102 and ac <= 100:
-        gap = min(((ts - 102) + (gr - 102)) / 6.0, 1.0); val = max(val, 0.3 + 0.3*gap)
+        gap = min(((ts - 102) + (gr - 102)) / 6.0, 1.0); val = max(val, 0.3 + 0.3 * gap)
     return round(val, 3)
+
 hh["UEI"] = hh.apply(uei_row, axis=1)
 
-# ---- 5) HiddenScore (0..3) + Tier + Note ----
+# 5) HiddenScore v2 (0..3)
 hidden = (
     0.55 * pd.to_numeric(hh["SOS"], errors="coerce").fillna(0.0) +
     0.30 * pd.to_numeric(hh["ASI2"], errors="coerce").fillna(0.0) +
@@ -745,43 +714,32 @@ hidden = (
 )
 if int(hh.shape[0]) <= 6:
     hidden = hidden * 0.90
-
 h_med = float(np.nanmedian(hidden))
 h_mad = float(np.nanmedian(np.abs(hidden - h_med)))
-h_sigma = max(1e-6, 1.4826*h_mad)
-hh["HiddenScore"] = (1.2 + (hidden - h_med) / (2.5*h_sigma)).clip(0.0, 3.0)
+h_sigma = max(1e-6, 1.4826 * h_mad)
+hh["HiddenScore"] = (1.2 + (hidden - h_med) / (2.5 * h_sigma)).clip(lower=0.0, upper=3.0)
 
 def hh_tier(s):
     if pd.isna(s): return ""
-    if s >= 1.8: return "🔥 Top Hidden"
-    if s >= 1.2: return "🟡 Notable Hidden"
+    if s >= 1.8:   return "🔥 Top Hidden"
+    if s >= 1.2:   return "🟡 Notable Hidden"
     return ""
 hh["Tier"] = hh["HiddenScore"].apply(hh_tier)
 
 def hh_note(r):
-    bits=[]
-    if r.get("Tier","")!="":
-        if pd.to_numeric(r.get("SOS"), errors="coerce") >= 1.2: bits.append("sectionals superior")
+    bits = []
+    if r.get("Tier", "") != "":
+        if pd.to_numeric(r.get("SOS"), errors="coerce") >= 1.2:
+            bits.append("sectionals superior")
         asi2 = pd.to_numeric(r.get("ASI2"), errors="coerce")
         if asi2 >= 0.8:   bits.append("ran against strong bias")
         elif asi2 >= 0.4: bits.append("ran against bias")
-        if pd.to_numeric(r.get("TFS_plus"), errors="coerce") > 0: bits.append("trip friction late")
-        if pd.to_numeric(r.get("UEI"), errors="coerce") >= 0.5: bits.append("latent potential if shape flips")
+        if pd.to_numeric(r.get("TFS_plus"), errors="coerce") > 0:
+            bits.append("trip friction late")
+        if pd.to_numeric(r.get("UEI"), errors="coerce") >= 0.5:
+            bits.append("latent potential if shape flips")
     return ("; ".join(bits).capitalize() + ".") if bits else ""
 hh["Note"] = hh.apply(hh_note, axis=1)
-
-# ---- Show & persist ----
-cols_hh = ["Horse","Finish_Pos","PI","GCI","tsSPI","Accel","Grind","SOS","ASI2","TFS","UEI","HiddenScore","Tier","Note"]
-for c in cols_hh:
-    if c not in hh.columns: hh[c] = np.nan
-
-hh_view = hh.sort_values(["Tier","HiddenScore","PI"], ascending=[True, False, False])[cols_hh]
-st.markdown("## Hidden Horses v2")
-st.dataframe(hh_view, use_container_width=True)
-
-# make available to other batches
-st.session_state["hh"] = hh
-
 
 # -------------------- Persist Batch-2 outputs for later batches --------------------
 st.session_state["metrics"] = metrics
@@ -2091,4 +2049,3 @@ st.markdown(
     "All data locally cached. Version <b>3.1 Unified Stable</b>.",
     unsafe_allow_html=True,
 )
-
