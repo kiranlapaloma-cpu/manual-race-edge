@@ -282,7 +282,7 @@ st.session_state["grid"] = grid
 st.session_state["seg_plan"] = seg_plan
 st.session_state["finish_len_expected"] = finish_len_expected
 st.session_state["SHOW_WARNINGS"] = SHOW_WARNINGS
-st.session_state["DEBUG"] = DEBUGb
+st.session_state["DEBUG"] = DEBUG
 
 # ======================= Batch 2 — Metric Computation Engine =======================
 # Uses Batch 1 session state: work_df, race_distance_m, grid, seg_plan, finish_len_expected
