@@ -1094,6 +1094,52 @@ else:
     st.download_button("Download PI stacks (PNG)", buf3.getvalue(), file_name="pi_stacks.png", mime="image/png")
     st.caption("Slices are rescaled to sum exactly to each horse’s PI. ★ = race winner.")
 
+# ======================= Hidden Horses (v2) — Display =======================
+st.markdown("## 🕵️ Hidden Horses (v2)")
+
+hh = st.session_state.get("hh", None)
+if hh is None or hh.empty:
+    st.info("Hidden Horses not available yet — run Batches 1 & 2 with data.")
+else:
+    # columns to show
+    cols_hh = ["Horse","Finish_Pos","PI","GCI","tsSPI","Accel","Grind",
+               "SOS","ASI2","TFS","UEI","HiddenScore","Tier","Note"]
+    for c in cols_hh:
+        if c not in hh.columns:
+            hh[c] = np.nan
+
+    # order: flagged tiers first
+    tier_order = {"🔥 Top Hidden": 0, "🟡 Notable Hidden": 1, "": 2}
+    hh["_tier_rank"] = hh["Tier"].map(tier_order).fillna(2).astype(int)
+
+    show_flagged_only = st.toggle("Show only flagged (Top/Notable)", value=True)
+    view = hh.copy()
+    if show_flagged_only:
+        view = view[view["Tier"] != ""]
+
+    # tidy formatting
+    for c in ["PI","GCI","tsSPI","Accel","Grind","SOS","ASI2","TFS","UEI","HiddenScore"]:
+        if c in view.columns:
+            view[c] = pd.to_numeric(view[c], errors="coerce").map(
+                lambda x: "" if pd.isna(x) else f"{x:.3f}"
+            )
+
+    # stable sort: tier → HiddenScore desc → PI desc → Finish_Pos asc
+    view = view.sort_values(
+        by=["_tier_rank","HiddenScore","PI","Finish_Pos"],
+        ascending=[True, False, False, True],
+        kind="mergesort"
+    ).drop(columns=["_tier_rank"])
+
+    st.dataframe(view[cols_hh], use_container_width=True)
+
+    # small legend + sanity nudge if TFS is NaN due to grid/columns
+    if view.empty:
+        st.caption("No runners currently flagged by Hidden Horses v2.")
+    else:
+        st.caption("Flag rules: 🔥 Top Hidden ≥ 1.8 • 🟡 Notable Hidden ≥ 1.2. "
+                   "Scores blend SOS, ASI² (bias adversity), late variability (TFS) and UEI.")
+        
 # ======================= Batch 4 — Database Integration (SQLite) =======================
 # Requires Batches 1–3 to have run. Uses st.session_state["metrics"], ["work_df"], ["race_distance_m"],
 # ["grid"], ["seg_plan"], and optionally ["race_meta"] (you can set it in Batch 1).
