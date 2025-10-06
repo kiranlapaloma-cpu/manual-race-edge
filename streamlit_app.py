@@ -813,48 +813,58 @@ def uei_row(r):
 hh["UEI"] = hh.apply(uei_row, axis=1)
 
 # 6) HiddenScore v2 (0..3)
-hidden = (0.55*pd.to_numeric(hh["SOS"], errors="coerce").fillna(0.0) +
-          0.30*pd.to_numeric(hh["ASI2"], errors="coerce").fillna(0.0) +
-          0.10*pd.to_numeric(hh["TFS_plus"], errors="coerce").fillna(0.0) +
-          0.05*pd.to_numeric(hh["UEI"], errors="coerce").fillna(0.0))
-if int(hh.shape[0]) <= 6: hidden *= 0.90
+hidden = (
+    0.55 * pd.to_numeric(hh["SOS"], errors="coerce").fillna(0.0) +
+    0.30 * pd.to_numeric(hh["ASI2"], errors="coerce").fillna(0.0) +
+    0.10 * pd.to_numeric(hh["TFS_plus"], errors="coerce").fillna(0.0) +
+    0.05 * pd.to_numeric(hh["UEI"], errors="coerce").fillna(0.0)
+)
+if int(hh.shape[0]) <= 6:
+    hidden = hidden * 0.90
 
 h_med = float(np.nanmedian(hidden))
 h_mad = float(np.nanmedian(np.abs(hidden - h_med)))
-h_sigma = max(1e-6, 1.4826*h_mad)
-hh["HiddenScore"] = (1.2 + (hidden - h_med) / (2.5*h_sigma)).clip(lower=0.0, upper=3.0)
+h_sigma = max(1e-6, 1.4826 * h_mad)
+hh["HiddenScore"] = (1.2 + (hidden - h_med) / (2.5 * h_sigma)).clip(lower=0.0, upper=3.0)
 
-# 7) Tiering & Notes
 def hh_tier(s):
     if pd.isna(s): return ""
-    if s >= 1.8:   return "Top Hidden"   # text for PDF safety (emoji can break in ReportLab)
-    if s >= 1.2:   return "Notable Hidden"
+    if s >= 1.8:   return "🔥 Top Hidden"
+    if s >= 1.2:   return "🟡 Notable Hidden"
     return ""
 hh["Tier"] = hh["HiddenScore"].apply(hh_tier)
 
 def hh_note(r):
-    bits=[]
-    if r.get("Tier","")!="":
-        if pd.to_numeric(r.get("SOS"), errors="coerce") >= 1.2: bits.append("sectionals superior")
+    bits = []
+    if r.get("Tier", "") != "":
+        if pd.to_numeric(r.get("SOS"), errors="coerce") >= 1.2:
+            bits.append("sectionals superior")
         asi2 = pd.to_numeric(r.get("ASI2"), errors="coerce")
         if asi2 >= 0.8:   bits.append("ran against strong bias")
         elif asi2 >= 0.4: bits.append("ran against bias")
-        if pd.to_numeric(r.get("TFS_plus"), errors="coerce") > 0: bits.append("trip friction late")
-        if pd.to_numeric(r.get("UEI"), errors="coerce") >= 0.5: bits.append("latent potential if shape flips")
+        if pd.to_numeric(r.get("TFS_plus"), errors="coerce") > 0:
+            bits.append("trip friction late")
+        if pd.to_numeric(r.get("UEI"), errors="coerce") >= 0.5:
+            bits.append("latent potential if shape flips")
     return ("; ".join(bits).capitalize() + ".") if bits else ""
 hh["Note"] = hh.apply(hh_note, axis=1)
 
-cols_hh = ["Horse","Finish_Pos","PI","GCI","tsSPI","Accel","Grind","SOS","ASI2","TFS","UEI","HiddenScore","Tier","Note"]
+cols_hh = [
+    "Horse", "Finish_Pos", "PI", "GCI",
+    "tsSPI", "Accel", "Grind",
+    "SOS", "ASI2", "TFS", "UEI",
+    "HiddenScore", "Tier", "Note"
+]
 for c in cols_hh:
-    if c not in hh.columns: hh[c]=np.nan
-hh_view = hh.sort_values(["Tier","HiddenScore","PI"], ascending=[True,False,False])[cols_hh]
-st.dataframe(hh_view, use_container_width=True)
+    if c not in hh.columns:
+        hh[c] = np.nan
 
+hh_view = hh.sort_values(["Tier", "HiddenScore", "PI"], ascending=[True, False, False])[cols_hh]
+st.dataframe(hh_view, width="stretch")
 st.caption(
-    "Conventions — grid uses 200 m blocks with an optional initial stub if distance % 200 ≠ 0. "
-    "`X_Time` = time from (X+Δ)→X, where Δ = stub length for the first split, else 200. "
-    "`Finish_Time` is 200→0. If only a race total is uploaded, the app derives the last-200 as "
-    "`Finish_Time = total − sum(other splits)`."
+    "Hidden Horses v2: SOS = sectional outlier (robust), ASI² = against-shape magnitude (bias-aware), "
+    "TFS = trip friction (late variability vs mid pace), UEI = underused engine. "
+    "Tiering: 🔥 ≥ 1.8, 🟡 ≥ 1.2."
 )
 
 # ======================= PDF Report Builder ===============================
