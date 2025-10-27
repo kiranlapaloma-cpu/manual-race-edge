@@ -6,15 +6,43 @@ import matplotlib.pyplot as plt
 import io, math, re, os, sqlite3, hashlib
 from datetime import datetime
 
-import numpy as np, pandas as pd
-pd.set_option("future.no_silent_downcasting", True)
-# Patch pandas→Streamlit serialization
+# ======================= Global JSON-safe fallback =======================
+import numpy as np
+import pandas as pd
+import streamlit as st
+
 def _nan_json_guard(df):
+    """
+    Universal safety wrapper to prevent Streamlit JSON serialization errors.
+    Replaces np.nan/np.inf with None before sending to Streamlit widgets.
+    """
     if isinstance(df, pd.DataFrame):
         return df.replace([np.inf, -np.inf], np.nan).where(pd.notna(df), None)
+    elif isinstance(df, pd.Series):
+        return df.replace([np.inf, -np.inf], np.nan).where(pd.notna(df), None)
     return df
-st.dataframe = (lambda f: lambda *a, **kw: f(_nan_json_guard(a[0]), **kw))(st.dataframe)
 
+# Wrap st.dataframe, st.table, and st.download_button to sanitize inputs automatically
+_orig_dataframe = st.dataframe
+def _safe_dataframe(data, *args, **kwargs):
+    return _orig_dataframe(_nan_json_guard(data), *args, **kwargs)
+st.dataframe = _safe_dataframe
+
+_orig_table = st.table
+def _safe_table(data, *args, **kwargs):
+    return _orig_table(_nan_json_guard(data), *args, **kwargs)
+st.table = _safe_table
+
+_orig_download_button = st.download_button
+def _safe_download_button(*args, **kwargs):
+    data = kwargs.get("data", None)
+    if isinstance(data, (pd.DataFrame, pd.Series)):
+        kwargs["data"] = _nan_json_guard(data)
+    if data is None:
+        return st.empty()  # prevent serialization of None
+    return _orig_download_button(*args, **kwargs)
+st.download_button = _safe_download_button
+# ========================================================================
 # ----------------------- Page config -----------------------
 st.set_page_config(
     page_title="Race Edge — PI v3.2 + Hidden v2 + Ability v2 + CG + Race Shape + DB",
