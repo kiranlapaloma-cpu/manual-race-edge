@@ -6,10 +6,9 @@ import matplotlib.pyplot as plt
 import io, math, re, os, sqlite3, hashlib
 from datetime import datetime
 
-# ======================= Global NaN/Inf → None guard (JSON-safe) =======================
+# ======================= Global NaN/Inf → None guard (JSON-safe, index-safe) =======================
 import math, numpy as np, pandas as pd, streamlit as st
-
-pd.options.mode.use_inf_as_na = True  # treat inf like NA throughout pandas
+pd.options.mode.use_inf_as_na = True
 
 def _is_nanlike(x):
     try:
@@ -18,38 +17,45 @@ def _is_nanlike(x):
     except Exception:
         return False
 
+def _san_df(df: pd.DataFrame) -> pd.DataFrame:
+    # values
+    clean = df.replace([np.inf, -np.inf], np.nan).where(lambda d: d.notna(), None)
+    # index/columns too
+    clean.index   = [None if _is_nanlike(v) else v for v in clean.index.tolist()]
+    clean.columns = [None if _is_nanlike(v) else v for v in clean.columns.tolist()]
+    # force object dtype so Arrow doesn’t re-infer with NaNs
+    return clean.astype("object")
+
+def _san_ser(s: pd.Series) -> pd.Series:
+    ss = s.replace([np.inf, -np.inf], np.nan).where(s.notna(), None)
+    ss.index = [None if _is_nanlike(v) else v for v in ss.index.tolist()]
+    return ss.astype("object")
+
 def _sanitize(obj):
-    """Recursively replace NaN/±Inf with None; handle pandas, numpy, dict/list/tuple, and scalars."""
-    # pandas objects
-    if isinstance(obj, pd.DataFrame):
-        df = obj.replace([np.inf, -np.inf], np.nan)
-        return df.where(pd.notna(df), None)
-    if isinstance(obj, pd.Series):
-        s = obj.replace([np.inf, -np.inf], np.nan)
-        return s.where(pd.notna(s), None)
+    # pandas
+    if isinstance(obj, pd.DataFrame): return _san_df(obj).reset_index(drop=True)
+    if isinstance(obj, pd.Series):    return _san_ser(obj).reset_index(drop=True)
     # pandas Styler
     try:
         from pandas.io.formats.style import Styler
         if isinstance(obj, Styler):
-            sty = obj.copy()
-            sty.data = _sanitize(sty.data)  # sanitize underlying DataFrame
+            sty = obj
+            sty.data = _san_df(sty.data).reset_index(drop=True)
             return sty
     except Exception:
         pass
-    # numpy arrays
+    # numpy
     if isinstance(obj, np.ndarray):
         return [_sanitize(v) for v in obj.tolist()]
-    # dict / list / tuple
+    # dict / list / tuple (recursive)
     if isinstance(obj, dict):
         return {k: _sanitize(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return type(obj)(_sanitize(v) for v in obj)
     # scalars
-    if _is_nanlike(obj):
-        return None
-    return obj
+    return None if _is_nanlike(obj) else obj
 
-# ---- Wrap common Streamlit emitters ----
+# ---- Patch common emitters (incl. data_editor) ----
 _orig_write = st.write
 def _safe_write(*args, **kwargs):
     return _orig_write(*(_sanitize(a) for a in args),
@@ -57,40 +63,43 @@ def _safe_write(*args, **kwargs):
 st.write = _safe_write
 
 _orig_json = st.json
-def _safe_json(obj, *args, **kwargs):
-    return _orig_json(_sanitize(obj), *args, **kwargs)
-st.json = _safe_json
+st.json = lambda obj, *a, **k: _orig_json(_sanitize(obj), *a, **k)
 
 _orig_metric = st.metric
-def _safe_metric(label, value, delta=None, *args, **kwargs):
-    # metric chokes on NaN/Inf → give it strings when missing
-    v = _sanitize(value)
-    d = _sanitize(delta)
-    if v is None: v = "-"
-    if d is None and delta is not None: d = "-"
-    return _orig_metric(label, v, d, *args, **kwargs)
+def _safe_metric(label, value, delta=None, *a, **k):
+    v = _sanitize(value); d = _sanitize(delta)
+    return _orig_metric(label, "-" if v is None else v, "-" if (delta is not None and d is None) else d, *a, **k)
 st.metric = _safe_metric
 
 _orig_dataframe = st.dataframe
-def _safe_dataframe(data=None, *args, **kwargs):
-    return _orig_dataframe(_sanitize(data), *args, **kwargs)
+def _safe_dataframe(data=None, *a, **k):
+    data = _sanitize(data)
+    # final guard: if it’s still a DataFrame-like, ensure a clean RangeIndex
+    try:
+        if isinstance(data, pd.DataFrame):
+            data = data.reset_index(drop=True)
+    except Exception:
+        pass
+    return _orig_dataframe(data, *a, **k)
 st.dataframe = _safe_dataframe
 
 _orig_table = st.table
-def _safe_table(data=None, *args, **kwargs):
-    return _orig_table(_sanitize(data), *args, **kwargs)
-st.table = _safe_table
+st.table = lambda data=None, *a, **k: _orig_table(_sanitize(data), *a, **k)
+
+# (optional but helpful)
+if hasattr(st, "data_editor"):
+    _orig_editor = st.data_editor
+    st.data_editor = lambda data=None, *a, **k: _orig_editor(_sanitize(data), *a, **k)
 
 _orig_download_button = st.download_button
-def _safe_download_button(*args, **kwargs):
-    if "data" in kwargs:
-        kwargs["data"] = _sanitize(kwargs["data"])
-        # If someone passes a DataFrame/Series directly, turn it into CSV bytes:
-        if isinstance(kwargs["data"], (pd.DataFrame, pd.Series)):
-            kwargs["data"] = kwargs["data"].to_csv(index=False).encode("utf-8")
-    return _orig_download_button(*args, **kwargs)
+def _safe_download_button(*a, **k):
+    if "data" in k:
+        k["data"] = _sanitize(k["data"])
+        if isinstance(k["data"], (pd.DataFrame, pd.Series)):
+            k["data"] = k["data"].to_csv(index=False).encode("utf-8")
+    return _orig_download_button(*a, **k)
 st.download_button = _safe_download_button
-# ======================= /Global NaN/Inf guard =======================
+# ======================= /Global guard =======================
 # ----------------------- Page config -----------------------
 st.set_page_config(
     page_title="Race Edge — PI v3.2 + Hidden v2 + Ability v2 + CG + Race Shape + DB",
