@@ -56,6 +56,45 @@ def color_cycle(n):
         i += 1
     return out
 
+# ---------- Safety helpers (drop-in) ----------
+def to_num(x):
+    """Coerce to numeric with NaN on failure (alias for consistency)."""
+    return pd.to_numeric(x, errors="coerce")
+
+def safe_num(x, default=0.0):
+    """Return a finite float; else default."""
+    try:
+        v = float(x)
+        return v if np.isfinite(v) else float(default)
+    except Exception:
+        return float(default)
+
+def sanitize_jsonable(obj, ndigits=3):
+    """
+    Recursively convert NaN/Inf -> None and round floats.
+    Use before st.json/vega/altair or writing dicts to state.
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, (float, np.floating)):
+        if not np.isfinite(obj): return None
+        return round(float(obj), ndigits)
+    if isinstance(obj, (int, np.integer, str, bool)):
+        return obj
+    if isinstance(obj, dict):
+        return {k: sanitize_jsonable(v, ndigits) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [sanitize_jsonable(v, ndigits) for v in obj]
+    if isinstance(obj, pd.Series):
+        return [sanitize_jsonable(v, ndigits) for v in obj.tolist()]
+    if isinstance(obj, pd.DataFrame):
+        return [sanitize_jsonable(r, ndigits) for _, r in obj.iterrows()]
+    # fallback
+    try:
+        return sanitize_jsonable(float(obj), ndigits)
+    except Exception:
+        return None
+
 from matplotlib.colors import TwoSlopeNorm
 
 def _safe_bal_norm(series, center=100.0, pad=0.5):
