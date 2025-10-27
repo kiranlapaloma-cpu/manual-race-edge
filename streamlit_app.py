@@ -6,6 +6,15 @@ import matplotlib.pyplot as plt
 import io, math, re, os, sqlite3, hashlib
 from datetime import datetime
 
+import numpy as np, pandas as pd
+pd.set_option("future.no_silent_downcasting", True)
+# Patch pandas→Streamlit serialization
+def _nan_json_guard(df):
+    if isinstance(df, pd.DataFrame):
+        return df.replace([np.inf, -np.inf], np.nan).where(pd.notna(df), None)
+    return df
+st.dataframe = (lambda f: lambda *a, **kw: f(_nan_json_guard(a[0]), **kw))(st.dataframe)
+
 # ----------------------- Page config -----------------------
 st.set_page_config(
     page_title="Race Edge — PI v3.2 + Hidden v2 + Ability v2 + CG + Race Shape + DB",
