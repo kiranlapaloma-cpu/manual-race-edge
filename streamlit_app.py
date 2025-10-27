@@ -6,43 +6,91 @@ import matplotlib.pyplot as plt
 import io, math, re, os, sqlite3, hashlib
 from datetime import datetime
 
-# ======================= Global JSON-safe fallback =======================
-import numpy as np
-import pandas as pd
-import streamlit as st
+# ======================= Global NaN/Inf → None guard (JSON-safe) =======================
+import math, numpy as np, pandas as pd, streamlit as st
 
-def _nan_json_guard(df):
-    """
-    Universal safety wrapper to prevent Streamlit JSON serialization errors.
-    Replaces np.nan/np.inf with None before sending to Streamlit widgets.
-    """
-    if isinstance(df, pd.DataFrame):
-        return df.replace([np.inf, -np.inf], np.nan).where(pd.notna(df), None)
-    elif isinstance(df, pd.Series):
-        return df.replace([np.inf, -np.inf], np.nan).where(pd.notna(df), None)
-    return df
+pd.options.mode.use_inf_as_na = True  # treat inf like NA throughout pandas
 
-# Wrap st.dataframe, st.table, and st.download_button to sanitize inputs automatically
+def _is_nanlike(x):
+    try:
+        return (x is None) or (isinstance(x, float) and (math.isnan(x) or math.isinf(x))) \
+               or (isinstance(x, (np.floating,)) and (np.isnan(x) or np.isinf(x)))
+    except Exception:
+        return False
+
+def _sanitize(obj):
+    """Recursively replace NaN/±Inf with None; handle pandas, numpy, dict/list/tuple, and scalars."""
+    # pandas objects
+    if isinstance(obj, pd.DataFrame):
+        df = obj.replace([np.inf, -np.inf], np.nan)
+        return df.where(pd.notna(df), None)
+    if isinstance(obj, pd.Series):
+        s = obj.replace([np.inf, -np.inf], np.nan)
+        return s.where(pd.notna(s), None)
+    # pandas Styler
+    try:
+        from pandas.io.formats.style import Styler
+        if isinstance(obj, Styler):
+            sty = obj.copy()
+            sty.data = _sanitize(sty.data)  # sanitize underlying DataFrame
+            return sty
+    except Exception:
+        pass
+    # numpy arrays
+    if isinstance(obj, np.ndarray):
+        return [_sanitize(v) for v in obj.tolist()]
+    # dict / list / tuple
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_sanitize(v) for v in obj)
+    # scalars
+    if _is_nanlike(obj):
+        return None
+    return obj
+
+# ---- Wrap common Streamlit emitters ----
+_orig_write = st.write
+def _safe_write(*args, **kwargs):
+    return _orig_write(*(_sanitize(a) for a in args),
+                       **{k: _sanitize(v) for k, v in kwargs.items()})
+st.write = _safe_write
+
+_orig_json = st.json
+def _safe_json(obj, *args, **kwargs):
+    return _orig_json(_sanitize(obj), *args, **kwargs)
+st.json = _safe_json
+
+_orig_metric = st.metric
+def _safe_metric(label, value, delta=None, *args, **kwargs):
+    # metric chokes on NaN/Inf → give it strings when missing
+    v = _sanitize(value)
+    d = _sanitize(delta)
+    if v is None: v = "-"
+    if d is None and delta is not None: d = "-"
+    return _orig_metric(label, v, d, *args, **kwargs)
+st.metric = _safe_metric
+
 _orig_dataframe = st.dataframe
-def _safe_dataframe(data, *args, **kwargs):
-    return _orig_dataframe(_nan_json_guard(data), *args, **kwargs)
+def _safe_dataframe(data=None, *args, **kwargs):
+    return _orig_dataframe(_sanitize(data), *args, **kwargs)
 st.dataframe = _safe_dataframe
 
 _orig_table = st.table
-def _safe_table(data, *args, **kwargs):
-    return _orig_table(_nan_json_guard(data), *args, **kwargs)
+def _safe_table(data=None, *args, **kwargs):
+    return _orig_table(_sanitize(data), *args, **kwargs)
 st.table = _safe_table
 
 _orig_download_button = st.download_button
 def _safe_download_button(*args, **kwargs):
-    data = kwargs.get("data", None)
-    if isinstance(data, (pd.DataFrame, pd.Series)):
-        kwargs["data"] = _nan_json_guard(data)
-    if data is None:
-        return st.empty()  # prevent serialization of None
+    if "data" in kwargs:
+        kwargs["data"] = _sanitize(kwargs["data"])
+        # If someone passes a DataFrame/Series directly, turn it into CSV bytes:
+        if isinstance(kwargs["data"], (pd.DataFrame, pd.Series)):
+            kwargs["data"] = kwargs["data"].to_csv(index=False).encode("utf-8")
     return _orig_download_button(*args, **kwargs)
 st.download_button = _safe_download_button
-# ========================================================================
+# ======================= /Global NaN/Inf guard =======================
 # ----------------------- Page config -----------------------
 st.set_page_config(
     page_title="Race Edge — PI v3.2 + Hidden v2 + Ability v2 + CG + Race Shape + DB",
