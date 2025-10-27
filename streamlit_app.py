@@ -1,3 +1,61 @@
+# ===== Mini hardening header (safe to paste at top) =====
+import streamlit as st, pandas as pd, numpy as np, re, math, json
+pd.options.mode.use_inf_as_na = True
+
+# 1) Non-recursive safe dataframe patch
+_orig_dataframe = st.dataframe
+def _safe_dataframe(obj, **kwargs):
+    try:
+        if isinstance(obj, pd.io.formats.style.Styler):  # unwrap Style
+            return _orig_dataframe(obj.data.replace([np.inf,-np.inf], np.nan), **kwargs)
+        if isinstance(obj, pd.DataFrame):
+            return _orig_dataframe(obj.replace([np.inf,-np.inf], np.nan), **kwargs)
+        return _orig_dataframe(obj, **kwargs)
+    except Exception as e:
+        st.warning(f"Display recovered: {e}")
+        try:
+            return _orig_dataframe(pd.DataFrame(obj), **kwargs)
+        except Exception:
+            st.text(str(obj)); return None
+st.dataframe = _safe_dataframe
+
+# 2) Safe metric (avoids JSON “NaN”)
+def st_metric_safe(label, value, *, fmt="{:.2f}", delta=None):
+    v = (None if value is None else float(value))
+    if v is None or not np.isfinite(v):
+        return st.metric(label, "—", delta=None)
+    return st.metric(label, fmt.format(v), delta=(fmt.format(delta) if isinstance(delta,(int,float)) else None))
+
+# 3) Header normaliser for split files (turns finish variants & 1500_time → 1500_Time)
+def normalize_headers(df: pd.DataFrame) -> pd.DataFrame:
+    lmap = {c.lower().strip().replace(" ","_").replace("-","_"): c for c in df.columns}
+    def alias(key, to):
+        if key in lmap and to not in df.columns:
+            df[to] = df[lmap[key]]
+    for k in ("finish_time","finish_split","finish"):
+        alias(k, "Finish_Time")
+    alias("finish_pos", "Finish_Pos")
+    rx = re.compile(r"^(\d{2,4})m?_(time|split)$")
+    for lk, orig in lmap.items():
+        m = rx.match(lk)
+        if m:
+            to = f"{m.group(1)}_Time"
+            if to not in df.columns:
+                df[to] = df[orig]
+    return df
+
+# 4) Simple step detector
+def detect_step(df: pd.DataFrame) -> int:
+    marks = []
+    for c in df.columns:
+        if c.endswith("_Time") and c != "Finish_Time":
+            try: marks.append(int(c.split("_")[0]))
+            except: pass
+    marks = sorted(set(marks), reverse=True)
+    if len(marks) < 2: return 100
+    diffs = [marks[i]-marks[i+1] for i in range(len(marks)-1)]
+    return 200 if sum(160<=d<=240 for d in diffs) > sum(60<=d<=140 for d in diffs) else 100
+# ===== /header =====
 # ======================= Batch 1 — Core + UI + I/O + DB bootstrap =======================
 import numpy as np
 import pandas as pd
