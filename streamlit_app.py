@@ -2643,6 +2643,47 @@ else:
         axQ.axhline(60, color="gray", lw=0.8, ls="--", alpha=0.45)
         axQ.plot([0,100],[0,100], color="gray", lw=0.7, ls=":", alpha=0.40)  # balance line (TSI≈SSI)
 
+        # ======================= V-Profile — Style Quadrant (polished) =======================
+st.markdown("## V-Profile Style Quadrant — Size = V-Profile · Colour = Onset (earlier = cooler)")
+
+# Expect these in VP from the V-Profile block:
+#   Horse, TSI (0..100), SSI (0..100), VProfile (0..10), Onset_from_home_m
+need = {"Horse","TSI","SSI","VProfile","Onset_from_home_m"}
+missing = [c for c in need if c not in VP.columns]
+if missing:
+    st.info("Style Quadrant: missing columns — " + ", ".join(missing))
+else:
+    plot_df = VP.copy()
+    # keep rows that at least have TSI & SSI; fill safe defaults for aesthetics
+    plot_df = plot_df.dropna(subset=["TSI","SSI"])
+    if plot_df.empty:
+        st.info("Style Quadrant: nothing to plot (no TSI/SSI).")
+    else:
+        # Data vectors
+        X  = pd.to_numeric(plot_df["TSI"], errors="coerce").clip(0, 100)
+        Y  = pd.to_numeric(plot_df["SSI"], errors="coerce").clip(0, 100)
+        SZ = 60.0 + (pd.to_numeric(plot_df["VProfile"], errors="coerce").clip(0,10) / 10.0) * 240.0
+        ON = pd.to_numeric(plot_df["Onset_from_home_m"], errors="coerce")
+
+        # Robust onset color range (falls back to ~200..650m if degenerate)
+        vmin = float(np.nanpercentile(ON, 10)) if ON.notna().any() else 200.0
+        vmax = float(np.nanpercentile(ON, 90)) if ON.notna().any() else 650.0
+        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
+            vmin, vmax = 200.0, 650.0
+
+        figQ, axQ = plt.subplots(figsize=(8.8, 6.6), layout="constrained")
+
+        # Soft background quadrants (same idea as your earlier map)
+        axQ.axvspan(60, 100, ymin=0.6, ymax=1.0, alpha=0.06)  # BR (complete)
+        axQ.axvspan(0,  60,  ymin=0.6, ymax=1.0, alpha=0.06)  # BL (grinder)
+        axQ.axvspan(60, 100, ymin=0.0, ymax=0.6, alpha=0.06)  # TR (speedball)
+        axQ.axvspan(0,  60,  ymin=0.0, ymax=0.6, alpha=0.06)  # TL (out-of-trip)
+
+        # Crosshairs + optional balance diagonal
+        axQ.axvline(60, color="gray", lw=0.8, ls="--", alpha=0.45)
+        axQ.axhline(60, color="gray", lw=0.8, ls="--", alpha=0.45)
+        axQ.plot([0,100],[0,100], color="gray", lw=0.7, ls=":", alpha=0.40)  # balance line (TSI≈SSI)
+
         # Scatter
         sc = axQ.scatter(X, Y, s=SZ, c=ON, cmap="coolwarm", vmin=vmin, vmax=vmax,
                          edgecolor="black", linewidth=0.6, alpha=0.95)
@@ -2673,6 +2714,20 @@ else:
             axQ.scatter([], [], s=s, label=lab, color="gray", edgecolor="black", alpha=0.6)
         leg = axQ.legend(loc="upper left", frameon=False, fontsize=9, title="Point size:")
         if leg: leg._legend_box.align = "left"
+
+        # Colourbar
+        cbar = figQ.colorbar(sc, ax=axQ, fraction=0.046, pad=0.04)
+        cbar.set_label("Onset — metres from home (earlier → cooler)")
+
+        st.pyplot(figQ)
+
+        # Optional: download
+        bufQ = io.BytesIO()
+        figQ.savefig(bufQ, format="png", dpi=300, bbox_inches="tight", facecolor="white")
+        st.download_button("Download V-Profile Style Quadrant (PNG)",
+                           bufQ.getvalue(), file_name="vprofile_style_quadrant.png",
+                           mime="image/png", use_container_width=True)
+# ======================= /V-Profile — Style Quadrant (polished) =======================
 
         # Colourbar
         cbar = figQ.colorbar(sc, ax=axQ, fraction=0.046, pad=0.04)
