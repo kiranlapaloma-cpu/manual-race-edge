@@ -2602,6 +2602,148 @@ st.caption(
 )
 # ======================= /V-Profile =======================
 
+# ======================= V-Profile — Style Quadrant Map =======================
+st.markdown("## V-Profile — Style Quadrant Map (TSI vs SSI)")
+
+try:
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+    import matplotlib as mpl
+except Exception:
+    st.warning("Matplotlib is required for the Style Quadrant Map.")
+else:
+    # --- Assemble plotting frame (one row per horse) ---
+    need_cols = ["Horse", "TSI", "SSI", "VProfile", "Onset_from_home_m", "Flags"]
+    for c in need_cols:
+        if c not in VP.columns:
+            VP[c] = np.nan
+    plot_df = VP.copy()
+
+    # Keep rows with both TSI and SSI available
+    plot_df = plot_df.dropna(subset=["TSI", "SSI"])
+    if plot_df.empty:
+        st.info("Not enough data to render the Style Quadrant Map (need both TSI and SSI).")
+    else:
+        # ---- Axes & limits (0..100 with soft padding) ----
+        x = pd.to_numeric(plot_df["TSI"], errors="coerce").clip(0, 100)
+        y = pd.to_numeric(plot_df["SSI"], errors="coerce").clip(0, 100)
+
+        # ---- Dot size = VProfile (0..10) ----
+        vp = pd.to_numeric(plot_df["VProfile"], errors="coerce").fillna(0.0).clip(0.0, 10.0)
+        size_min, size_max = 60.0, 320.0
+        sizes = size_min + (vp / 10.0) * (size_max - size_min)
+
+        # ---- Colour = Onset (cool = early, warm = late) ----
+        # Earlier onset (bigger metres-from-home) → cooler; later onset → warmer.
+        onset_m = pd.to_numeric(plot_df["Onset_from_home_m"], errors="coerce")
+        # Robust bounds so a few NaNs/outliers don't break the scale
+        if onset_m.notna().any():
+            o_lo = float(np.nanpercentile(onset_m, 5))
+            o_hi = float(np.nanpercentile(onset_m, 95))
+            if not np.isfinite(o_lo): o_lo = 0.0
+            if not np.isfinite(o_hi) or o_hi <= o_lo: o_hi = o_lo + 1.0
+            norm = mpl.colors.Normalize(vmin=o_lo, vmax=o_hi)
+        else:
+            onset_m = pd.Series(np.nan, index=plot_df.index)
+            norm = mpl.colors.Normalize(vmin=0.0, vmax=1.0)  # dummy
+        cmap = plt.get_cmap("coolwarm_r")  # reversed so larger onset (early) → cool
+
+        # ---- Edge styling from flags ----
+        flags = plot_df.get("Flags").astype(str).fillna("")
+        dual_mask  = flags.str.contains("Dual Threat", case=False, na=False)
+        flash_mask = flags.str.contains("Flash Risk",  case=False, na=False)
+        # Default edge
+        edge_w = np.where(dual_mask, 1.8, np.where(flash_mask, 1.4, 0.8))
+        edge_c = np.where(dual_mask, "black", np.where(flash_mask, "dimgray", "black"))
+
+        # ---- Figure ----
+        fig, ax = plt.subplots(figsize=(8.4, 7.8))
+
+        # Quadrant tints
+        alpha = 0.12
+        ax.add_patch(Rectangle((60, 60), 40, 40, facecolor="#9bd49b", alpha=alpha, zorder=0))  # 🏆 Complete
+        ax.add_patch(Rectangle((0,  60), 60, 40, facecolor="#9bc3e0", alpha=alpha, zorder=0))  # 🏋️ Grinder/Stayer
+        ax.add_patch(Rectangle((60, 0),  40, 60, facecolor="#f7b27a", alpha=alpha, zorder=0))  # ⚡ Sprinter/Speedball
+        ax.add_patch(Rectangle((0,  0),  60, 60, facecolor="#c7a6d8", alpha=alpha, zorder=0))  # 🧩 Underpowered/Out of Trip
+
+        # Crosshairs at 60/60 and grid
+        ax.axvline(60, color="gray", lw=1.0, ls=(0,(3,3)), zorder=1)
+        ax.axhline(60, color="gray", lw=1.0, ls=(0,(3,3)), zorder=1)
+        ax.set_xlim(0, 100)
+        ax.set_ylim(0, 100)
+        ax.set_xlabel("TSI — Top-Speed Index (right = faster top gear) →")
+        ax.set_ylabel("SSI — Sustain Index (up = longer at/near top speed) ↑")
+        ax.set_title("V-Profile Style Quadrant — Size = V-Profile · Colour = Onset (early → cool, late → warm)")
+        ax.grid(True, linestyle=":", alpha=0.25, zorder=0)
+
+        # Scatter
+        colors = cmap(norm(onset_m.to_numpy()))
+        sc = ax.scatter(
+            x.to_numpy(), y.to_numpy(),
+            s=sizes.to_numpy(),
+            c=colors,
+            edgecolor=edge_c,
+            linewidth=edge_w,
+            alpha=0.95,
+            zorder=2
+        )
+
+        # Labels (use your repel helper if available)
+        names = plot_df["Horse"].astype(str).tolist()
+        try:
+            label_points_neatly(ax, x.to_numpy(), y.to_numpy(), names)
+        except Exception:
+            # Minimal fallback labels if your helper isn't available
+            for xi, yi, nm in zip(x, y, names):
+                ax.text(xi+1.0, yi+1.0, str(nm), fontsize=8.4,
+                        bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="none", alpha=0.75))
+
+        # Legends
+        # Size legend
+        for s, lab in [(size_min, "V-Profile low"),
+                       (0.5*(size_min+size_max), "V-Profile mid"),
+                       (size_max, "V-Profile high")]:
+            ax.scatter([], [], s=s, c="white", edgecolor="black", linewidth=0.8, label=lab)
+        leg1 = ax.legend(loc="upper left", frameon=False, fontsize=8, title="Point size:", borderpad=0.3)
+        ax.add_artist(leg1)
+
+        # Colourbar (Onset metres-from-home)
+        cax = fig.add_axes([0.92, 0.25, 0.02, 0.5])  # manual so it never overlaps legend
+        cb = mpl.colorbar.ColorbarBase(cax, cmap=cmap, norm=norm, orientation="vertical")
+        cb.set_label("Onset — metres from home (earlier = cooler)", fontsize=9)
+
+        # Badge hints (just a text legend to avoid double plotting)
+        ax.text(0.01, -0.12,
+                "Badges: 💨 Raw Pace Weapon (TSI ≥85) · 💪 True Sustainer (SSI ≥85) · ⚖️ |TSI−SSI| ≤ 8\n"
+                "Rings: solid = Dual Threat · thicker gray = Flash Risk",
+                transform=ax.transAxes, fontsize=8.5, va="top", ha="left")
+
+        st.pyplot(fig)
+
+        # Quick automatic callouts (optional, safe if you want to keep it)
+        hi_tsi = plot_df.loc[plot_df["TSI"] >= 85, "Horse"].tolist()
+        hi_ssi = plot_df.loc[plot_df["SSI"] >= 85, "Horse"].tolist()
+        both   = plot_df.loc[(plot_df["TSI"] >= 80) & (plot_df["SSI"] >= 75), "Horse"].tolist()
+
+        notes = []
+        if both:
+            notes.append(f"**Dual Threats:** {', '.join(map(str, both))}.")
+        if hi_tsi:
+            notes.append(f"**Raw Pace Weapons (TSI ≥85):** {', '.join(map(str, hi_tsi))}.")
+        if hi_ssi:
+            notes.append(f"**True Sustainers (SSI ≥85):** {', '.join(map(str, hi_ssi))}.")
+
+        if notes:
+            with st.expander("Auto callouts"):
+                for n in notes:
+                    st.write("• " + n)
+
+        st.caption(
+            "Top-right = complete profile; top-left = grinder/stayer; bottom-right = sprinter/speedball; "
+            "bottom-left = underpowered/out-of-trip. Colour = onset timing (earlier = cooler). "
+            "Use with distance & going context for tactic/trip insights."
+        )
+# ======================= /V-Profile — Style Quadrant Map =======================
 # ======================= xWin — Probability to Win (100-replay view) =======================
 st.markdown("## xWin — Probability to Win")
 
