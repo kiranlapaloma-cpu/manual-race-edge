@@ -2485,7 +2485,13 @@ for _, r in VP.iterrows():
         # degrade: use proxies when splits unavailable → we’ll score through percentiles later
         Vmax.append(np.nan); SustainDur.append(0.0); SustainDist.append(0.0); AUC_90_100.append(0.0); Onset_m.append(np.nan)
 
-VP["Vmax_mps"]     = Vmax
+# Store both m/s and km/h for display
+VP["Vmax_mps"] = Vmax
+VP["Vmax_kmph"] = np.where(
+    pd.notna(VP["Vmax_mps"]),
+    VP["Vmax_mps"] * 3.6,  # convert to km/h
+    np.nan
+)
 VP["Sustain_s"]    = SustainDur
 VP["Sustain_m"]    = SustainDist
 VP["AUC_90_100"]   = AUC_90_100
@@ -2562,13 +2568,13 @@ def _flags_row(r):
 VP["Flags"] = VP.apply(_flags_row, axis=1)
 
 # --------- tidy view ----------
-show_cols = ["Horse","VProfile","TSI","SSI","Vmax_mps","Sustain_s","Sustain_m","Flags"]
+show_cols = ["Horse","VProfile","TSI","SSI","Vmax_kmph","Sustain_s","Sustain_m","Flags"]
 for c in show_cols:
     if c not in VP.columns: VP[c] = np.nan
 
 VP_view = VP.sort_values(["VProfile","SSI","TSI"], ascending=[False,False,False])[show_cols]
 VP_view = VP_view.rename(columns={
-    "Vmax_mps":"Vmax (m/s)",
+    "Vmax_kmph":"Vmax (km/h)",
     "Sustain_s":"Sustain (s ≥~95%)",
     "Sustain_m":"Sustain (m ≥~95%)"
 })
