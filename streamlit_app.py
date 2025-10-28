@@ -2602,148 +2602,91 @@ st.caption(
 )
 # ======================= /V-Profile =======================
 
-# ======================= V-Profile — Style Quadrant Map =======================
-st.markdown("## V-Profile — Style Quadrant Map (TSI vs SSI)")
+# ======================= V-Profile — Style Quadrant (polished) =======================
+st.markdown("## V-Profile Style Quadrant — Size = V-Profile · Colour = Onset (earlier = cooler)")
 
-try:
-    import matplotlib.pyplot as plt
-    from matplotlib.patches import Rectangle
-    import matplotlib as mpl
-except Exception:
-    st.warning("Matplotlib is required for the Style Quadrant Map.")
+# Expect these in VP from the V-Profile block:
+#   Horse, TSI (0..100), SSI (0..100), VProfile (0..10), Onset_from_home_m
+need = {"Horse","TSI","SSI","VProfile","Onset_from_home_m"}
+missing = [c for c in need if c not in VP.columns]
+if missing:
+    st.info("Style Quadrant: missing columns — " + ", ".join(missing))
 else:
-    # --- Assemble plotting frame (one row per horse) ---
-    need_cols = ["Horse", "TSI", "SSI", "VProfile", "Onset_from_home_m", "Flags"]
-    for c in need_cols:
-        if c not in VP.columns:
-            VP[c] = np.nan
     plot_df = VP.copy()
-
-    # Keep rows with both TSI and SSI available
-    plot_df = plot_df.dropna(subset=["TSI", "SSI"])
+    # keep rows that at least have TSI & SSI; fill safe defaults for aesthetics
+    plot_df = plot_df.dropna(subset=["TSI","SSI"])
     if plot_df.empty:
-        st.info("Not enough data to render the Style Quadrant Map (need both TSI and SSI).")
+        st.info("Style Quadrant: nothing to plot (no TSI/SSI).")
     else:
-        # ---- Axes & limits (0..100 with soft padding) ----
-        x = pd.to_numeric(plot_df["TSI"], errors="coerce").clip(0, 100)
-        y = pd.to_numeric(plot_df["SSI"], errors="coerce").clip(0, 100)
+        # Data vectors
+        X  = pd.to_numeric(plot_df["TSI"], errors="coerce").clip(0, 100)
+        Y  = pd.to_numeric(plot_df["SSI"], errors="coerce").clip(0, 100)
+        SZ = 60.0 + (pd.to_numeric(plot_df["VProfile"], errors="coerce").clip(0,10) / 10.0) * 240.0
+        ON = pd.to_numeric(plot_df["Onset_from_home_m"], errors="coerce")
 
-        # ---- Dot size = VProfile (0..10) ----
-        vp = pd.to_numeric(plot_df["VProfile"], errors="coerce").fillna(0.0).clip(0.0, 10.0)
-        size_min, size_max = 60.0, 320.0
-        sizes = size_min + (vp / 10.0) * (size_max - size_min)
+        # Robust onset color range (falls back to ~200..650m if degenerate)
+        vmin = float(np.nanpercentile(ON, 10)) if ON.notna().any() else 200.0
+        vmax = float(np.nanpercentile(ON, 90)) if ON.notna().any() else 650.0
+        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
+            vmin, vmax = 200.0, 650.0
 
-        # ---- Colour = Onset (cool = early, warm = late) ----
-        # Earlier onset (bigger metres-from-home) → cooler; later onset → warmer.
-        onset_m = pd.to_numeric(plot_df["Onset_from_home_m"], errors="coerce")
-        # Robust bounds so a few NaNs/outliers don't break the scale
-        if onset_m.notna().any():
-            o_lo = float(np.nanpercentile(onset_m, 5))
-            o_hi = float(np.nanpercentile(onset_m, 95))
-            if not np.isfinite(o_lo): o_lo = 0.0
-            if not np.isfinite(o_hi) or o_hi <= o_lo: o_hi = o_lo + 1.0
-            norm = mpl.colors.Normalize(vmin=o_lo, vmax=o_hi)
-        else:
-            onset_m = pd.Series(np.nan, index=plot_df.index)
-            norm = mpl.colors.Normalize(vmin=0.0, vmax=1.0)  # dummy
-        cmap = plt.get_cmap("coolwarm_r")  # reversed so larger onset (early) → cool
+        figQ, axQ = plt.subplots(figsize=(8.8, 6.6), layout="constrained")
 
-        # ---- Edge styling from flags ----
-        flags = plot_df.get("Flags").astype(str).fillna("")
-        dual_mask  = flags.str.contains("Dual Threat", case=False, na=False)
-        flash_mask = flags.str.contains("Flash Risk",  case=False, na=False)
-        # Default edge
-        edge_w = np.where(dual_mask, 1.8, np.where(flash_mask, 1.4, 0.8))
-        edge_c = np.where(dual_mask, "black", np.where(flash_mask, "dimgray", "black"))
+        # Soft background quadrants (same idea as your earlier map)
+        axQ.axvspan(60, 100, ymin=0.6, ymax=1.0, alpha=0.06)  # BR (complete)
+        axQ.axvspan(0,  60,  ymin=0.6, ymax=1.0, alpha=0.06)  # BL (grinder)
+        axQ.axvspan(60, 100, ymin=0.0, ymax=0.6, alpha=0.06)  # TR (speedball)
+        axQ.axvspan(0,  60,  ymin=0.0, ymax=0.6, alpha=0.06)  # TL (out-of-trip)
 
-        # ---- Figure ----
-        fig, ax = plt.subplots(figsize=(8.4, 7.8))
-
-        # Quadrant tints
-        alpha = 0.12
-        ax.add_patch(Rectangle((60, 60), 40, 40, facecolor="#9bd49b", alpha=alpha, zorder=0))  # 🏆 Complete
-        ax.add_patch(Rectangle((0,  60), 60, 40, facecolor="#9bc3e0", alpha=alpha, zorder=0))  # 🏋️ Grinder/Stayer
-        ax.add_patch(Rectangle((60, 0),  40, 60, facecolor="#f7b27a", alpha=alpha, zorder=0))  # ⚡ Sprinter/Speedball
-        ax.add_patch(Rectangle((0,  0),  60, 60, facecolor="#c7a6d8", alpha=alpha, zorder=0))  # 🧩 Underpowered/Out of Trip
-
-        # Crosshairs at 60/60 and grid
-        ax.axvline(60, color="gray", lw=1.0, ls=(0,(3,3)), zorder=1)
-        ax.axhline(60, color="gray", lw=1.0, ls=(0,(3,3)), zorder=1)
-        ax.set_xlim(0, 100)
-        ax.set_ylim(0, 100)
-        ax.set_xlabel("TSI — Top-Speed Index (right = faster top gear) →")
-        ax.set_ylabel("SSI — Sustain Index (up = longer at/near top speed) ↑")
-        ax.set_title("V-Profile Style Quadrant — Size = V-Profile · Colour = Onset (early → cool, late → warm)")
-        ax.grid(True, linestyle=":", alpha=0.25, zorder=0)
+        # Crosshairs + optional balance diagonal
+        axQ.axvline(60, color="gray", lw=0.8, ls="--", alpha=0.45)
+        axQ.axhline(60, color="gray", lw=0.8, ls="--", alpha=0.45)
+        axQ.plot([0,100],[0,100], color="gray", lw=0.7, ls=":", alpha=0.40)  # balance line (TSI≈SSI)
 
         # Scatter
-        colors = cmap(norm(onset_m.to_numpy()))
-        sc = ax.scatter(
-            x.to_numpy(), y.to_numpy(),
-            s=sizes.to_numpy(),
-            c=colors,
-            edgecolor=edge_c,
-            linewidth=edge_w,
-            alpha=0.95,
-            zorder=2
-        )
+        sc = axQ.scatter(X, Y, s=SZ, c=ON, cmap="coolwarm", vmin=vmin, vmax=vmax,
+                         edgecolor="black", linewidth=0.6, alpha=0.95)
 
-        # Labels (use your repel helper if available)
-        names = plot_df["Horse"].astype(str).tolist()
+        # Labels with your repel helper if available
         try:
-            label_points_neatly(ax, x.to_numpy(), y.to_numpy(), names)
+            label_points_neatly(axQ, X.values, Y.values, plot_df["Horse"].astype(str).tolist())
         except Exception:
-            # Minimal fallback labels if your helper isn't available
-            for xi, yi, nm in zip(x, y, names):
-                ax.text(xi+1.0, yi+1.0, str(nm), fontsize=8.4,
-                        bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="none", alpha=0.75))
+            for xi, yi, nm in zip(X, Y, plot_df["Horse"]):
+                axQ.text(xi, yi, str(nm), fontsize=8.4,
+                         bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="none", alpha=0.75))
 
-        # Legends
-        # Size legend
-        for s, lab in [(size_min, "V-Profile low"),
-                       (0.5*(size_min+size_max), "V-Profile mid"),
-                       (size_max, "V-Profile high")]:
-            ax.scatter([], [], s=s, c="white", edgecolor="black", linewidth=0.8, label=lab)
-        leg1 = ax.legend(loc="upper left", frameon=False, fontsize=8, title="Point size:", borderpad=0.3)
-        ax.add_artist(leg1)
+        # Axes & grid
+        axQ.set_xlim(0, 100); axQ.set_ylim(0, 100)
+        axQ.set_xlabel("TSI — Top-Speed Index (right = faster top gear) →")
+        axQ.set_ylabel("SSI — Sustain Index (up = longer at/near top speed) ↑")
+        axQ.set_title("V-Profile Style Quadrant — Size = V-Profile · Colour = Onset (early → cool, late → warm)")
+        axQ.grid(True, linestyle=":", alpha=0.25)
 
-        # Colourbar (Onset metres-from-home)
-        cax = fig.add_axes([0.92, 0.25, 0.02, 0.5])  # manual so it never overlaps legend
-        cb = mpl.colorbar.ColorbarBase(cax, cmap=cmap, norm=norm, orientation="vertical")
-        cb.set_label("Onset — metres from home (earlier = cooler)", fontsize=9)
+        # Corner quadrant labels (subtle, presentation-friendly)
+        axQ.text(98,  96, "🏆 Complete",          ha="right", va="top",    fontsize=10, alpha=0.85)
+        axQ.text(2,   96, "🏋️ Grinder/Stayer",    ha="left",  va="top",    fontsize=10, alpha=0.85)
+        axQ.text(98,   4, "⚡ Speedball",         ha="right", va="bottom", fontsize=10, alpha=0.85)
+        axQ.text(2,    4, "🧩 Out-of-Trip",       ha="left",  va="bottom", fontsize=10, alpha=0.85)
 
-        # Badge hints (just a text legend to avoid double plotting)
-        ax.text(0.01, -0.12,
-                "Badges: 💨 Raw Pace Weapon (TSI ≥85) · 💪 True Sustainer (SSI ≥85) · ⚖️ |TSI−SSI| ≤ 8\n"
-                "Rings: solid = Dual Threat · thicker gray = Flash Risk",
-                transform=ax.transAxes, fontsize=8.5, va="top", ha="left")
+        # Point-size legend (V-Profile)
+        for s, lab in [(60, "V-Profile low"), (160, "V-Profile mid"), (260, "V-Profile high")]:
+            axQ.scatter([], [], s=s, label=lab, color="gray", edgecolor="black", alpha=0.6)
+        leg = axQ.legend(loc="upper left", frameon=False, fontsize=9, title="Point size:")
+        if leg: leg._legend_box.align = "left"
 
-        st.pyplot(fig)
+        # Colourbar
+        cbar = figQ.colorbar(sc, ax=axQ, fraction=0.046, pad=0.04)
+        cbar.set_label("Onset — metres from home (earlier → cooler)")
 
-        # Quick automatic callouts (optional, safe if you want to keep it)
-        hi_tsi = plot_df.loc[plot_df["TSI"] >= 85, "Horse"].tolist()
-        hi_ssi = plot_df.loc[plot_df["SSI"] >= 85, "Horse"].tolist()
-        both   = plot_df.loc[(plot_df["TSI"] >= 80) & (plot_df["SSI"] >= 75), "Horse"].tolist()
+        st.pyplot(figQ)
 
-        notes = []
-        if both:
-            notes.append(f"**Dual Threats:** {', '.join(map(str, both))}.")
-        if hi_tsi:
-            notes.append(f"**Raw Pace Weapons (TSI ≥85):** {', '.join(map(str, hi_tsi))}.")
-        if hi_ssi:
-            notes.append(f"**True Sustainers (SSI ≥85):** {', '.join(map(str, hi_ssi))}.")
-
-        if notes:
-            with st.expander("Auto callouts"):
-                for n in notes:
-                    st.write("• " + n)
-
-        st.caption(
-            "Top-right = complete profile; top-left = grinder/stayer; bottom-right = sprinter/speedball; "
-            "bottom-left = underpowered/out-of-trip. Colour = onset timing (earlier = cooler). "
-            "Use with distance & going context for tactic/trip insights."
-        )
-# ======================= /V-Profile — Style Quadrant Map =======================
+        # Optional: download
+        bufQ = io.BytesIO()
+        figQ.savefig(bufQ, format="png", dpi=300, bbox_inches="tight", facecolor="white")
+        st.download_button("Download V-Profile Style Quadrant (PNG)",
+                           bufQ.getvalue(), file_name="vprofile_style_quadrant.png",
+                           mime="image/png", use_container_width=True)
+# ======================= /V-Profile — Style Quadrant (polished) =======================
 # ======================= xWin — Probability to Win (100-replay view) =======================
 st.markdown("## xWin — Probability to Win")
 
