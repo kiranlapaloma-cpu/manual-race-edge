@@ -2602,146 +2602,136 @@ st.caption(
 )
 # ======================= /V-Profile =======================
 
-# ======================= V-Profile — Style Quadrant (polished) =======================
-st.markdown("## V-Profile Style Quadrant — Size = V-Profile · Colour = Onset (earlier = cooler)")
+# ======================= V-Profile Style Quadrant (robust scaling, no top-10 filter) =======================
+st.markdown("## V-Profile Style Quadrant — Size = V-Profile · Colour = Onset (early → cool, late → warm)")
 
-# Expect these in VP from the V-Profile block:
-#   Horse, TSI (0..100), SSI (0..100), VProfile (0..10), Onset_from_home_m
-need = {"Horse","TSI","SSI","VProfile","Onset_from_home_m"}
-missing = [c for c in need if c not in VP.columns]
-if missing:
-    st.info("Style Quadrant: missing columns — " + ", ".join(missing))
+import numpy as np, pandas as pd, io, matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+from matplotlib.lines import Line2D
+
+# ---------- label helper (uses adjustText if available; otherwise a light builtin) ----------
+def _label_points(ax, X, Y, names):
+    try:
+        from adjustText import adjust_text
+        texts = [ax.text(x, y, n,
+                         fontsize=8.6,
+                         bbox=dict(boxstyle="round,pad=0.20", fc="white", ec="none", alpha=0.85))
+                 for x, y, n in zip(X, Y, names)]
+        adjust_text(
+            texts, x=X, y=Y, ax=ax,
+            only_move={'points':'y','text':'xy'},
+            force_points=0.6, force_text=0.7,
+            expand_text=(1.05,1.15), expand_points=(1.05,1.15),
+            arrowprops=dict(arrowstyle="->", lw=0.75, color="black", alpha=0.9, shrinkA=0, shrinkB=3)
+        )
+    except Exception:
+        # tiny fallback: nudge diagonally to reduce collisions
+        offs = np.linspace(-0.9, 0.9, len(X))
+        for (x,y,n,dx) in zip(X, Y, names, offs):
+            ax.text(x + 0.8*np.sign(x) + 0.2*dx,
+                    y + 0.8*np.sign(y) - 0.2*dx,
+                    n, fontsize=8.6,
+                    bbox=dict(boxstyle="round,pad=0.20", fc="white", ec="none", alpha=0.85))
+
+# ---------- build the plotting frame ----------
+# Prefer the tidy view if it exists; otherwise build from VP/metrics
+if 'VP_view' in locals() and isinstance(VP_view, pd.DataFrame) and not VP_view.empty:
+    Q = VP_view.copy()
 else:
-    plot_df = VP.copy()
-    # keep rows that at least have TSI & SSI; fill safe defaults for aesthetics
-    plot_df = plot_df.dropna(subset=["TSI","SSI"])
-    if plot_df.empty:
-        st.info("Style Quadrant: nothing to plot (no TSI/SSI).")
+    # fall back to columns in VP (created earlier in your V-Profile block)
+    Q = pd.DataFrame()
+    src = VP if 'VP' in locals() else metrics
+    for c in ["Horse","TSI","SSI","VProfile","Onset_from_home_m"]:
+        Q[c] = pd.to_numeric(src.get(c), errors="coerce") if c!="Horse" else src.get("Horse")
+    # rename for a consistent schema
+    Q.rename(columns={"Onset_from_home_m":"Onset"}, inplace=True)
+
+# ensure required cols exist
+for c in ["TSI","SSI","VProfile"]:
+    if c not in Q.columns: Q[c] = np.nan
+if "Onset" not in Q.columns:
+    # degrade gracefully: use tsSPI as proxy for onset ordering
+    if "Onset_from_home_m" in Q.columns:
+        Q["Onset"] = pd.to_numeric(Q["Onset_from_home_m"], errors="coerce")
     else:
-        # Data vectors
-        X  = pd.to_numeric(plot_df["TSI"], errors="coerce").clip(0, 100)
-        Y  = pd.to_numeric(plot_df["SSI"], errors="coerce").clip(0, 100)
-        SZ = 60.0 + (pd.to_numeric(plot_df["VProfile"], errors="coerce").clip(0,10) / 10.0) * 240.0
-        ON = pd.to_numeric(plot_df["Onset_from_home_m"], errors="coerce")
+        # bigger number = "earlier from home" → cooler colour
+        Q["Onset"] = pd.to_numeric(metrics.get("tsSPI"), errors="coerce") if "metrics" in locals() else np.nan
 
-        # Robust onset color range (falls back to ~200..650m if degenerate)
-        vmin = float(np.nanpercentile(ON, 10)) if ON.notna().any() else 200.0
-        vmax = float(np.nanpercentile(ON, 90)) if ON.notna().any() else 650.0
-        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
-            vmin, vmax = 200.0, 650.0
-
-        figQ, axQ = plt.subplots(figsize=(8.8, 6.6), layout="constrained")
-
-        # Soft background quadrants (same idea as your earlier map)
-        axQ.axvspan(60, 100, ymin=0.6, ymax=1.0, alpha=0.06)  # BR (complete)
-        axQ.axvspan(0,  60,  ymin=0.6, ymax=1.0, alpha=0.06)  # BL (grinder)
-        axQ.axvspan(60, 100, ymin=0.0, ymax=0.6, alpha=0.06)  # TR (speedball)
-        axQ.axvspan(0,  60,  ymin=0.0, ymax=0.6, alpha=0.06)  # TL (out-of-trip)
-
-        # Crosshairs + optional balance diagonal
-        axQ.axvline(60, color="gray", lw=0.8, ls="--", alpha=0.45)
-        axQ.axhline(60, color="gray", lw=0.8, ls="--", alpha=0.45)
-        axQ.plot([0,100],[0,100], color="gray", lw=0.7, ls=":", alpha=0.40)  # balance line (TSI≈SSI)
-
-        # ======================= V-Profile — Style Quadrant (polished) =======================
-st.markdown("## V-Profile Style Quadrant — Size = V-Profile · Colour = Onset (earlier = cooler)")
-
-# Expect these in VP from the V-Profile block:
-#   Horse, TSI (0..100), SSI (0..100), VProfile (0..10), Onset_from_home_m
-need = {"Horse","TSI","SSI","VProfile","Onset_from_home_m"}
-missing = [c for c in need if c not in VP.columns]
-if missing:
-    st.info("Style Quadrant: missing columns — " + ", ".join(missing))
+# drop rows with no X or Y
+Q = Q[Q["TSI"].notna() & Q["SSI"].notna()].copy()
+if Q.empty:
+    st.info("Not enough V-Profile data to draw the quadrant.")
 else:
-    plot_df = VP.copy()
-    # keep rows that at least have TSI & SSI; fill safe defaults for aesthetics
-    plot_df = plot_df.dropna(subset=["TSI","SSI"])
-    if plot_df.empty:
-        st.info("Style Quadrant: nothing to plot (no TSI/SSI).")
-    else:
-        # Data vectors
-        X  = pd.to_numeric(plot_df["TSI"], errors="coerce").clip(0, 100)
-        Y  = pd.to_numeric(plot_df["SSI"], errors="coerce").clip(0, 100)
-        SZ = 60.0 + (pd.to_numeric(plot_df["VProfile"], errors="coerce").clip(0,10) / 10.0) * 240.0
-        ON = pd.to_numeric(plot_df["Onset_from_home_m"], errors="coerce")
+    # ---------- robust axis limits (2–98% with gentle padding) ----------
+    def _robust_limits(s, lo_cap=0.0, hi_cap=100.0, min_span=35.0):
+        s = pd.to_numeric(s, errors="coerce")
+        if s.notna().sum() == 0:
+            return (0.0, 100.0)
+        q2, q98 = np.nanpercentile(s, [2, 98])
+        pad = 0.06 * max(1e-6, q98 - q2)
+        lo, hi = q2 - pad, q98 + pad
+        # enforce minimum span, centered on the median
+        if (hi - lo) < min_span:
+            med = float(np.nanmedian(s))
+            half = 0.5 * min_span
+            lo, hi = med - half, med + half
+        lo = max(lo_cap, lo - 1.0)  # micro extra room
+        hi = min(hi_cap, hi + 1.0)
+        return float(lo), float(hi)
 
-        # Robust onset color range (falls back to ~200..650m if degenerate)
-        vmin = float(np.nanpercentile(ON, 10)) if ON.notna().any() else 200.0
-        vmax = float(np.nanpercentile(ON, 90)) if ON.notna().any() else 650.0
+    xlo, xhi = _robust_limits(Q["TSI"])
+    ylo, yhi = _robust_limits(Q["SSI"])
+
+    # ---------- figure ----------
+    figQ, axQ = plt.subplots(figsize=(9.2, 6.6), layout="constrained")
+
+    # quadrant tinting
+    TINT = 0.10
+    axQ.add_patch(Rectangle((0, 0),         xhi, yhi, facecolor="#fce8e6", alpha=TINT, zorder=0))  # speedball
+    axQ.add_patch(Rectangle((0, 60),        xhi, yhi-60, facecolor="#e8f5e9", alpha=TINT, zorder=0))  # complete
+    axQ.add_patch(Rectangle((0, 0),         60, yhi, facecolor="#fff8e1", alpha=TINT, zorder=0))  # grind-stayer
+    axQ.add_patch(Rectangle((0, 0),         xhi, 0, facecolor="none", alpha=0.0, zorder=0))  # placeholder
+
+    # reference lines (60/60 and diagonal)
+    axQ.axvline(60, color="gray", lw=1.1, ls=(0, (4, 3)))
+    axQ.axhline(60, color="gray", lw=1.1, ls=(0, (4, 3)))
+    # diagonal across current limits
+    diag_x = np.linspace(xlo, xhi, 200)
+    axQ.plot(diag_x, diag_x, color="gray", lw=0.9, ls=":", alpha=0.8)
+
+    # point sizes from VProfile (clamped)
+    vp = pd.to_numeric(Q["VProfile"], errors="coerce").fillna(0.0).clip(0.0, 10.0)
+    sz = 40.0 + (vp / 10.0) * 240.0
+
+    # colour by onset (cool early → warm late). Robust colour bounds.
+    on = pd.to_numeric(Q["Onset"], errors="coerce")
+    if on.notna().sum() >= 3:
+        vmin, vmax = np.nanpercentile(on, [10, 90])
         if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
-            vmin, vmax = 200.0, 650.0
+            vmin, vmax = float(np.nanmin(on)), float(np.nanmax(on))
+    else:
+        vmin, vmax = (200.0, 280.0)  # sensible sprint/mile fallback band
 
-        figQ, axQ = plt.subplots(figsize=(8.8, 6.6), layout="constrained")
+    # scatter
+    sc = axQ.scatter(Q["TSI"], Q["SSI"], s=sz, c=on, cmap="coolwarm",
+                     vmin=vmin, vmax=vmax, edgecolor="black", linewidth=0.6, alpha=0.95)
 
-        # Soft background quadrants (same idea as your earlier map)
-        axQ.axvspan(60, 100, ymin=0.6, ymax=1.0, alpha=0.06)  # BR (complete)
-        axQ.axvspan(0,  60,  ymin=0.6, ymax=1.0, alpha=0.06)  # BL (grinder)
-        axQ.axvspan(60, 100, ymin=0.0, ymax=0.6, alpha=0.06)  # TR (speedball)
-        axQ.axvspan(0,  60,  ymin=0.0, ymax=0.6, alpha=0.06)  # TL (out-of-trip)
+    # edge-inset: nudge any points that sit exactly on the limits so labels remain visible
+    EPS = 0.001
+    X = Q["TSI"].to_numpy().astype(float).copy()
+    Y = Q["SSI"].to_numpy().astype(float).copy()
+    for i in range(len(X)):
+        if abs(X[i] - xlo) < EPS: X[i] += 1.2
+        if abs(X[i] - xhi) < EPS: X[i] -= 1.2
+        if abs(Y[i] - ylo) < EPS: Y[i] += 1.2
+        if abs(Y[i] - yhi) < EPS: Y[i] -= 1.2
 
-        # Crosshairs + optional balance diagonal
-        axQ.axvline(60, color="gray", lw=0.8, ls="--", alpha=0.45)
-        axQ.axhline(60, color="gray", lw=0.8, ls="--", alpha=0.45)
-        axQ.plot([0,100],[0,100], color="gray", lw=0.7, ls=":", alpha=0.40)  # balance line (TSI≈SSI)
+    # labels
+    names = Q["Horse"].astype(str).tolist() if "Horse" in Q.columns else [f"H{i+1}" for i in range(len(X))]
+    _label_points(axQ, X, Y, names)
 
-        # Scatter
-        sc = axQ.scatter(X, Y, s=SZ, c=ON, cmap="coolwarm", vmin=vmin, vmax=vmax,
-                         edgecolor="black", linewidth=0.6, alpha=0.95)
-
-        # Labels with your repel helper if available
-        try:
-            label_points_neatly(axQ, X.values, Y.values, plot_df["Horse"].astype(str).tolist())
-        except Exception:
-            for xi, yi, nm in zip(X, Y, plot_df["Horse"]):
-                axQ.text(xi, yi, str(nm), fontsize=8.4,
-                         bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="none", alpha=0.75))
-
-        # Axes & grid
-        axQ.set_xlim(0, 100); axQ.set_ylim(0, 100)
-        axQ.set_xlabel("TSI — Top-Speed Index (right = faster top gear) →")
-        axQ.set_ylabel("SSI — Sustain Index (up = longer at/near top speed) ↑")
-        axQ.set_title("V-Profile Style Quadrant — Size = V-Profile · Colour = Onset (early → cool, late → warm)")
-        axQ.grid(True, linestyle=":", alpha=0.25)
-
-        # Corner quadrant labels (subtle, presentation-friendly)
-        axQ.text(98,  96, "🏆 Complete",          ha="right", va="top",    fontsize=10, alpha=0.85)
-        axQ.text(2,   96, "🏋️ Grinder/Stayer",    ha="left",  va="top",    fontsize=10, alpha=0.85)
-        axQ.text(98,   4, "⚡ Speedball",         ha="right", va="bottom", fontsize=10, alpha=0.85)
-        axQ.text(2,    4, "🧩 Out-of-Trip",       ha="left",  va="bottom", fontsize=10, alpha=0.85)
-
-        # Point-size legend (V-Profile)
-        for s, lab in [(60, "V-Profile low"), (160, "V-Profile mid"), (260, "V-Profile high")]:
-            axQ.scatter([], [], s=s, label=lab, color="gray", edgecolor="black", alpha=0.6)
-        leg = axQ.legend(loc="upper left", frameon=False, fontsize=9, title="Point size:")
-        if leg: leg._legend_box.align = "left"
-
-        # Colourbar
-        cbar = figQ.colorbar(sc, ax=axQ, fraction=0.046, pad=0.04)
-        cbar.set_label("Onset — metres from home (earlier → cooler)")
-
-        st.pyplot(figQ)
-
-        # Optional: download
-        bufQ = io.BytesIO()
-        figQ.savefig(bufQ, format="png", dpi=300, bbox_inches="tight", facecolor="white")
-        st.download_button("Download V-Profile Style Quadrant (PNG)",
-                           bufQ.getvalue(), file_name="vprofile_style_quadrant.png",
-                           mime="image/png", use_container_width=True)
-# ======================= /V-Profile — Style Quadrant (polished) =======================
-
-        # Colourbar
-        cbar = figQ.colorbar(sc, ax=axQ, fraction=0.046, pad=0.04)
-        cbar.set_label("Onset — metres from home (earlier → cooler)")
-
-        st.pyplot(figQ)
-
-        # Optional: download
-        bufQ = io.BytesIO()
-        figQ.savefig(bufQ, format="png", dpi=300, bbox_inches="tight", facecolor="white")
-        st.download_button("Download V-Profile Style Quadrant (PNG)",
-                           bufQ.getvalue(), file_name="vprofile_style_quadrant.png",
-                           mime="image/png", use_container_width=True)
-# ======================= /V-Profile — Style Quadrant (polished) =======================
+    # axes
+    axQ.set_xlim(x
 # ======================= xWin — Probability to Win (100-replay view) =======================
 st.markdown("## xWin — Probability to Win")
 
